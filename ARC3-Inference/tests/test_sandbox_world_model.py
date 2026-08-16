@@ -21,7 +21,7 @@ def _frame_payload(step_index, ascii_text):
     }
 
 
-def _initial_state(world_model_source="", history=None):
+def _initial_state(world_model_source="", history=None, no_effect_actions=None):
     if history is None:
         history = [
             {"action": "", "frame": _frame_payload(0, "x..")},
@@ -34,6 +34,7 @@ def _initial_state(world_model_source="", history=None):
         "valid_actions": ["RIGHT"],
         "last_action_result": {},
         "world_model_source": world_model_source,
+        "no_effect_actions": no_effect_actions,
     }
 
 
@@ -41,11 +42,13 @@ def _no_actions(actions):
     raise AssertionError("this test must not step the environment")
 
 
-def _run(code, world_model_source="", history=None):
+def _run(code, world_model_source="", history=None, no_effect_actions=None):
     return run_sandboxed_python(
         code=code,
         timeout_seconds=20,
-        initial_state=_initial_state(world_model_source, history=history),
+        initial_state=_initial_state(
+            world_model_source, history=history, no_effect_actions=no_effect_actions
+        ),
         action_handler=_no_actions,
     )
 
@@ -180,3 +183,13 @@ def test_backtest_with_max_transitions_zero_reports_no_transitions():
     report = outcome["result"]
     assert report["total"] == 0
     assert report["certified"] is False
+
+
+def test_no_effect_actions_are_exposed_to_the_sandbox():
+    outcome = _run("result = no_effect_actions", no_effect_actions=["LEFT", "SPACE"])
+    assert outcome["result"] == ["LEFT", "SPACE"]
+
+
+def test_no_effect_actions_defaults_to_an_empty_list():
+    outcome = _run("result = no_effect_actions")
+    assert outcome["result"] == []
