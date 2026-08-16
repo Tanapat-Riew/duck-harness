@@ -1166,6 +1166,7 @@ class ToolAgent:
         self._summarized_knowledge = _empty_world_model()
         self._world_model_source: str = ""
         self._world_model_error: str = ""
+        self._last_backtest: dict[str, Any] | None = None
 
     # --- Setup & bookkeeping: session lifecycle and token accounting --------
 
@@ -1199,6 +1200,7 @@ class ToolAgent:
             self._summarized_knowledge = _empty_world_model()
             self._world_model_source = ""
             self._world_model_error = ""
+            self._last_backtest = None
 
     @property
     def total_tokens(self) -> int:
@@ -1860,6 +1862,10 @@ class ToolAgent:
             self._world_model_source = ""
         else:
             self._world_model_error = ""
+
+        backtest_report = sandbox_result.get("last_backtest")
+        if isinstance(backtest_report, dict) and backtest_report.get("ok"):
+            self._last_backtest = dict(backtest_report)
 
         action_results = [
             item

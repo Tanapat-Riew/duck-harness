@@ -88,3 +88,57 @@ def test_saving_a_good_model_clears_a_stale_reload_error():
     assert outcome["result"]["ok"] is True
     assert "def step(state, action):" in outcome["world_model_source"]
     assert not outcome["world_model_error"]
+
+
+WRONG_MODEL = '''
+def encode(frame):
+    return frame.ascii.index("x")
+
+def step(state, action):
+    return state
+'''
+
+EXPLODING_MODEL = '''
+def encode(frame):
+    return frame.ascii.index("x")
+
+def step(state, action):
+    raise ValueError("boom")
+'''
+
+
+def test_backtest_certifies_a_correct_model():
+    outcome = _run("result = run_backtest()", world_model_source=CORRECT_MODEL)
+    assert outcome["result"] == {
+        "ok": True,
+        "total": 2,
+        "exact": 2,
+        "certified": True,
+        "first_mismatch": None,
+    }
+    assert outcome["last_backtest"]["certified"] is True
+
+
+def test_backtest_reports_the_first_mismatch():
+    outcome = _run("result = run_backtest()", world_model_source=WRONG_MODEL)
+    report = outcome["result"]
+    assert report["total"] == 2
+    assert report["exact"] == 0
+    assert report["certified"] is False
+    assert report["first_mismatch"]["index"] == 0
+    assert report["first_mismatch"]["action"] == "RIGHT"
+    assert report["first_mismatch"]["predicted"] == "0"
+    assert report["first_mismatch"]["observed"] == "1"
+
+
+def test_backtest_captures_an_exception_as_a_mismatch():
+    outcome = _run("result = run_backtest()", world_model_source=EXPLODING_MODEL)
+    report = outcome["result"]
+    assert report["certified"] is False
+    assert "boom" in report["first_mismatch"]["error"]
+
+
+def test_backtest_without_a_model_reports_not_ok():
+    outcome = _run("result = run_backtest()")
+    assert outcome["result"]["ok"] is False
+    assert "save_model" in outcome["result"]["error"]

@@ -397,6 +397,65 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
 
         runtime_globals["save_model"] = save_model
 
+        last_backtest = {}
+
+        def _truncate_repr(value, limit=400):
+            text = repr(value)
+            if len(text) <= limit:
+                return text
+            return text[:limit] + "... [" + str(len(text) - limit) + " chars omitted]"
+
+        def run_backtest(max_transitions=None):
+            encode_fn = runtime_globals.get("encode")
+            step_fn = runtime_globals.get("step")
+            if not callable(encode_fn) or not callable(step_fn):
+                return {
+                    "ok": False,
+                    "error": "No world model loaded. Call save_model(source) with encode and step first.",
+                }
+            transitions = list(runtime_globals.get("transitions") or [])
+            if max_transitions is not None:
+                transitions = transitions[-int(max_transitions):]
+            total = 0
+            exact = 0
+            first_mismatch = None
+            for index, transition in enumerate(transitions):
+                if transition.before_frame is None or transition.after_frame is None:
+                    continue
+                total += 1
+                try:
+                    predicted = step_fn(encode_fn(transition.before_frame), transition.action)
+                    observed = encode_fn(transition.after_frame)
+                except Exception as exc:
+                    if first_mismatch is None:
+                        first_mismatch = {
+                            "index": index,
+                            "action": transition.action,
+                            "error": _sanitize_exception(exc),
+                        }
+                    continue
+                if predicted == observed:
+                    exact += 1
+                elif first_mismatch is None:
+                    first_mismatch = {
+                        "index": index,
+                        "action": transition.action,
+                        "predicted": _truncate_repr(predicted),
+                        "observed": _truncate_repr(observed),
+                    }
+            report = {
+                "ok": True,
+                "total": total,
+                "exact": exact,
+                "certified": total > 0 and exact == total,
+                "first_mismatch": first_mismatch,
+            }
+            last_backtest.clear()
+            last_backtest.update(report)
+            return report
+
+        runtime_globals["run_backtest"] = run_backtest
+
         runtime_globals["action"] = action
         _refresh_state(initial.get("state") or {})
 
@@ -421,6 +480,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "action_results": _json_safe(action_results),
                     "world_model_source": saved_world_model["source"],
                     "world_model_error": runtime_globals.get("world_model_error"),
+                    "last_backtest": _json_safe(last_backtest) if last_backtest else None,
                 }
             )
         except Exception as exc:
@@ -432,6 +492,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "action_results": _json_safe(action_results),
                     "world_model_source": saved_world_model["source"],
                     "world_model_error": runtime_globals.get("world_model_error"),
+                    "last_backtest": _json_safe(last_backtest) if last_backtest else None,
                 }
             )
 
@@ -612,6 +673,7 @@ def run_sandboxed_python(
                     "action_results": list(message.get("action_results") or host_action_results),
                     "world_model_source": str(message.get("world_model_source", "") or ""),
                     "world_model_error": str(message.get("world_model_error") or ""),
+                    "last_backtest": message.get("last_backtest"),
                 }
 
             _wait_for_process_exit(process)
