@@ -415,7 +415,8 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                 }
             transitions = list(runtime_globals.get("transitions") or [])
             if max_transitions is not None:
-                transitions = transitions[-int(max_transitions):]
+                count = int(max_transitions)
+                transitions = transitions[-count:] if count > 0 else []
             total = 0
             exact = 0
             first_mismatch = None

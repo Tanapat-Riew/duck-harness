@@ -21,14 +21,16 @@ def _frame_payload(step_index, ascii_text):
     }
 
 
-def _initial_state(world_model_source=""):
-    return {
-        "current_frame": _frame_payload(2, "..x"),
-        "history": [
+def _initial_state(world_model_source="", history=None):
+    if history is None:
+        history = [
             {"action": "", "frame": _frame_payload(0, "x..")},
             {"action": "RIGHT", "frame": _frame_payload(1, ".x.")},
             {"action": "RIGHT", "frame": _frame_payload(2, "..x")},
-        ],
+        ]
+    return {
+        "current_frame": _frame_payload(2, "..x"),
+        "history": history,
         "valid_actions": ["RIGHT"],
         "last_action_result": {},
         "world_model_source": world_model_source,
@@ -39,11 +41,11 @@ def _no_actions(actions):
     raise AssertionError("this test must not step the environment")
 
 
-def _run(code, world_model_source=""):
+def _run(code, world_model_source="", history=None):
     return run_sandboxed_python(
         code=code,
         timeout_seconds=20,
-        initial_state=_initial_state(world_model_source),
+        initial_state=_initial_state(world_model_source, history=history),
         action_handler=_no_actions,
     )
 
@@ -136,9 +138,45 @@ def test_backtest_captures_an_exception_as_a_mismatch():
     report = outcome["result"]
     assert report["certified"] is False
     assert "boom" in report["first_mismatch"]["error"]
+    assert report["total"] == 2
+    assert report["exact"] == 0
 
 
 def test_backtest_without_a_model_reports_not_ok():
     outcome = _run("result = run_backtest()")
     assert outcome["result"]["ok"] is False
     assert "save_model" in outcome["result"]["error"]
+
+
+def test_backtest_with_zero_transitions_never_certifies():
+    outcome = _run(
+        "result = run_backtest()",
+        world_model_source=CORRECT_MODEL,
+        history=[{"action": "", "frame": _frame_payload(0, "x..")}],
+    )
+    report = outcome["result"]
+    assert report["total"] == 0
+    assert report["exact"] == 0
+    assert report["certified"] is False
+
+
+def test_backtest_skips_a_transition_with_no_before_frame():
+    outcome = _run(
+        "result = run_backtest()",
+        world_model_source=CORRECT_MODEL,
+        history=[
+            {"action": "RIGHT", "frame": _frame_payload(1, ".x.")},
+            {"action": "RIGHT", "frame": _frame_payload(2, "..x")},
+        ],
+    )
+    report = outcome["result"]
+    assert report["total"] == 1
+    assert report["exact"] == 1
+    assert report["certified"] is True
+
+
+def test_backtest_with_max_transitions_zero_reports_no_transitions():
+    outcome = _run("result = run_backtest(max_transitions=0)", world_model_source=CORRECT_MODEL)
+    report = outcome["result"]
+    assert report["total"] == 0
+    assert report["certified"] is False
