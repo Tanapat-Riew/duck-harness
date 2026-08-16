@@ -206,6 +206,7 @@ _REQUEST_SAFETY_MARGIN_TOKENS = 512
 _CONTEXT_OVERFLOW_RETRY_TRIM_TOKENS = 512
 _PERSISTENT_HISTORY_ASSISTANT_TURNS = 30
 _RESPONSE_META_MAX_CHARS = 4000
+_MAX_RENDERED_NO_EFFECT_ACTIONS = 10
 
 _PYTHON_TOOL_DESCRIPTION = (
     "Run one ephemeral Python snippet against preloaded ASCII game state. Available globals: "
@@ -398,6 +399,19 @@ def _empty_world_model() -> dict[str, str]:
         "current_plan": "",
         "cross_level_notes": "",
     }
+
+
+def _action_resets_effect_memory(action_result: dict[str, Any]) -> bool:
+    """Report whether an action result invalidates level-scoped effect memory.
+
+    Most no-effect evidence is positional ("LEFT does nothing at this wall"), so
+    a completed level, a game over, and a finished run all discard it alike.
+    """
+    return bool(
+        action_result.get("level_completed")
+        or action_result.get("game_over")
+        or action_result.get("run_complete")
+    )
 
 
 def _request_tool_choice(tools: list[dict[str, Any]] | None) -> str | None:
@@ -1442,9 +1456,13 @@ class ToolAgent:
                 lines.append("Last backtest: never run. Call `run_backtest()` before trusting this model.")
         dead_actions = sorted(getattr(self, "_no_effect_actions", {}))
         if dead_actions:
+            rendered = ", ".join(dead_actions[:_MAX_RENDERED_NO_EFFECT_ACTIONS])
+            overflow = len(dead_actions) - _MAX_RENDERED_NO_EFFECT_ACTIONS
+            if overflow > 0:
+                rendered += f" (+{overflow} more)"
             lines.append(
                 "Actions that changed nothing on this level so far: "
-                + ", ".join(dead_actions)
+                + rendered
                 + ". Do not re-test them without a reason."
             )
         return lines
@@ -1484,12 +1502,20 @@ class ToolAgent:
         change_report: dict[str, Any] | None,
         *,
         level_changed: bool,
+        executed_count: int = 1,
     ) -> None:
         """Track actions that moved nothing, so the model stops re-testing them.
 
         A HUD-only change counts as no effect: a moving timer bar is not evidence
         that the action did anything. The memory is level-scoped because an action
-        that is dead on one level often works on the next.
+        that is dead on one level often works on the next; ``level_changed`` also
+        covers a game over or a completed run, which reset the scene just as hard.
+
+        Nothing is recorded for a batch: the change report brackets every action
+        the batch executed, so a net diff cannot be attributed to any single one
+        of them. Positional clicks are skipped too — a specific row/col is not a
+        reusable action identity, and remembering each dead one would grow the
+        memory without bound on a click-driven level.
         """
         memory = getattr(self, "_no_effect_actions", None)
         if memory is None:
@@ -1498,8 +1524,10 @@ class ToolAgent:
         if level_changed:
             memory.clear()
             return
+        if executed_count > 1:
+            return
         name = str(action_display or "").strip()
-        if not name or not isinstance(change_report, dict):
+        if not name or name.startswith("MOUSE") or not isinstance(change_report, dict):
             return
         moved_gameplay = (
             int(change_report.get("changed_count", 0)) > 0
@@ -1952,10 +1980,15 @@ class ToolAgent:
             change_report = _frame_change_report(before_frame, after_frame)
             if change_report is not None:
                 compact_payload["change_report"] = change_report
+            try:
+                executed_count = int(compact_payload.get("executed_count", 1) or 1)
+            except (TypeError, ValueError):
+                executed_count = 1
             self._record_action_effect(
                 str(compact_payload.get("action_display") or ""),
                 change_report,
-                level_changed=bool(compact_payload.get("level_completed")),
+                level_changed=_action_resets_effect_memory(compact_payload),
+                executed_count=executed_count,
             )
             next_valid_actions = raw_payload.get("valid_actions")
             if isinstance(next_valid_actions, list):

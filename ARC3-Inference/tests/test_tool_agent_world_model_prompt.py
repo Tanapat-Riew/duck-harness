@@ -76,3 +76,15 @@ def test_status_lists_dead_actions():
     agent._no_effect_actions = {"LEFT": 3, "SPACE": 1}
     lines = agent._world_model_status_lines()
     assert any("LEFT, SPACE" in line for line in lines)
+
+
+def test_status_caps_the_dead_action_list():
+    agent = _agent()
+    agent._world_model_source = ""
+    agent._last_backtest = None
+    agent._no_effect_actions = {f"ACT{index:02d}": 1 for index in range(13)}
+    lines = agent._world_model_status_lines()
+    dead_line = next(line for line in lines if "changed nothing" in line)
+    assert "ACT09" in dead_line
+    assert "ACT10" not in dead_line
+    assert "(+3 more)" in dead_line
