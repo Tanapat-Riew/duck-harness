@@ -66,6 +66,7 @@ from inference.agent.vision_context import (
 
 from inference.agent.python_tool_sandbox import run_sandboxed_python
 from inference.agent.runtime_state import Frame, HistoryEntry, RUNTIME_STATE_FILENAME, load_runtime_state
+from inference.utils.board_change import classify_board_change
 from inference.utils.openai_compat import build_chat_payload, build_headers
 
 log = logging.getLogger(__name__)
@@ -282,6 +283,13 @@ def _terminal_action_stop_detail(reason: str | None) -> str:
 def _display_action_number(action_num: int) -> int:
     """Convert a 0-based action index to a 1-based number for display."""
     return max(1, int(action_num) + 1)
+
+
+def _frame_change_report(before: Frame | None, after: Frame | None) -> dict[str, Any] | None:
+    """Summarize the board change between two frames, or None if either is missing."""
+    if before is None or after is None:
+        return None
+    return classify_board_change(before.grid, after.grid).as_dict()
 
 
 def _normalize_summary_text(value: Any, *, max_chars: int | None = 280) -> str:
@@ -1807,10 +1815,15 @@ class ToolAgent:
                         last_action_result=compact_payload,
                     ),
                 }
+            before_frame, _ = load_runtime_state(state_path)
             raw_payload = self._step_env_callback({"actions": normalized_actions})
             if not isinstance(raw_payload, dict):
                 raise RuntimeError("action(actions) did not return a JSON-like payload.")
             compact_payload = self._compact_action_result(raw_payload)
+            after_frame, _ = load_runtime_state(state_path)
+            change_report = _frame_change_report(before_frame, after_frame)
+            if change_report is not None:
+                compact_payload["change_report"] = change_report
             next_valid_actions = raw_payload.get("valid_actions")
             if isinstance(next_valid_actions, list):
                 self._current_valid_actions = _normalize_valid_actions(next_valid_actions)
