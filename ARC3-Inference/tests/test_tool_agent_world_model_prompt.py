@@ -58,3 +58,12 @@ def test_status_reports_a_discarded_model_after_reload_failure():
     agent._world_model_error = "NameError: name 'foo' is not defined"
     lines = agent._world_model_status_lines()
     assert any("failed to reload" in line and "discarded" in line for line in lines)
+
+
+def test_status_lists_dead_actions():
+    agent = _agent()
+    agent._world_model_source = ""
+    agent._last_backtest = None
+    agent._no_effect_actions = {"LEFT": 3, "SPACE": 1}
+    lines = agent._world_model_status_lines()
+    assert any("LEFT, SPACE" in line for line in lines)

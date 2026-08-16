@@ -352,6 +352,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             runtime_globals["last_action"] = last_transition.action if last_transition is not None else None
             runtime_globals["valid_actions"] = [str(item) for item in state_payload.get("valid_actions", [])]
             runtime_globals["last_action_result"] = action_result
+            runtime_globals["no_effect_actions"] = list(state_payload.get("no_effect_actions") or [])
 
         def action(actions):
             normalized_actions = _normalize_actions(actions)

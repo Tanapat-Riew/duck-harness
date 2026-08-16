@@ -1169,6 +1169,7 @@ class ToolAgent:
         self._world_model_source: str = ""
         self._world_model_error: str = ""
         self._last_backtest: dict[str, Any] | None = None
+        self._no_effect_actions: dict[str, int] = {}
 
     # --- Setup & bookkeeping: session lifecycle and token accounting --------
 
@@ -1203,6 +1204,7 @@ class ToolAgent:
             self._world_model_source = ""
             self._world_model_error = ""
             self._last_backtest = None
+            self._no_effect_actions = {}
 
     @property
     def total_tokens(self) -> int:
@@ -1430,7 +1432,46 @@ class ToolAgent:
             lines.append(
                 "Your saved model failed to reload and has been discarded. Write a fresh one."
             )
+        dead_actions = sorted(getattr(self, "_no_effect_actions", {}))
+        if dead_actions:
+            lines.append(
+                "Actions that changed nothing on this level so far: "
+                + ", ".join(dead_actions)
+                + ". Do not re-test them without a reason."
+            )
         return lines
+
+    def _record_action_effect(
+        self,
+        action_display: str,
+        change_report: dict[str, Any] | None,
+        *,
+        level_changed: bool,
+    ) -> None:
+        """Track actions that moved nothing, so the model stops re-testing them.
+
+        A HUD-only change counts as no effect: a moving timer bar is not evidence
+        that the action did anything. The memory is level-scoped because an action
+        that is dead on one level often works on the next.
+        """
+        memory = getattr(self, "_no_effect_actions", None)
+        if memory is None:
+            memory = {}
+            self._no_effect_actions = memory
+        if level_changed:
+            memory.clear()
+            return
+        name = str(action_display or "").strip()
+        if not name or not isinstance(change_report, dict):
+            return
+        moved_gameplay = (
+            int(change_report.get("changed_count", 0)) > 0
+            and not bool(change_report.get("border_only"))
+        )
+        if moved_gameplay:
+            memory.pop(name, None)
+            return
+        memory[name] = memory.get(name, 0) + 1
 
     # --- Prompt construction: the per-turn user message ---------------------
 
@@ -1821,6 +1862,7 @@ class ToolAgent:
                     else {}
                 ),
                 "world_model_source": getattr(self, "_world_model_source", ""),
+                "no_effect_actions": sorted(getattr(self, "_no_effect_actions", {})),
             }
 
         terminal_action_result: dict[str, Any] | None = None
@@ -1873,6 +1915,11 @@ class ToolAgent:
             change_report = _frame_change_report(before_frame, after_frame)
             if change_report is not None:
                 compact_payload["change_report"] = change_report
+            self._record_action_effect(
+                str(compact_payload.get("action_display") or ""),
+                change_report,
+                level_changed=bool(compact_payload.get("level_completed")),
+            )
             next_valid_actions = raw_payload.get("valid_actions")
             if isinstance(next_valid_actions, list):
                 self._current_valid_actions = _normalize_valid_actions(next_valid_actions)
