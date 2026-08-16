@@ -100,6 +100,19 @@ PYTHON_ADDENDUM = (
     "- If an action result reports `game_over`, `run_complete`, `level_completed`, or `done`, stop acting immediately and re-ground on the next turn.\n"
 )
 
+WORLD_MODEL_ADDENDUM = (
+    "\n\nInduced world model:\n"
+    "- Every environment action costs score. Testing a theory against recorded transitions costs nothing. Prefer the free test.\n"
+    "- Write two functions as a source string and pass it to `save_model(source)`:\n"
+    "  `encode(frame)` maps a frame to a compact hashable state, and `step(state, action)` returns the next state.\n"
+    "- `encode` decides what counts as state. Leave timers, progress bars, and other HUD strips OUT of it, or they will make exact reproduction impossible.\n"
+    "- A saved model is re-loaded into `encode`/`step` at the start of every later `python` call in this game. It is not shared across passes.\n"
+    "- `run_backtest()` replays every recorded transition through your model and returns `total`, `exact`, `certified`, and the first mismatch. Rewrite and re-check as often as you like; it never touches the environment.\n"
+    "- Read `change_report` on action results: `border_only` true means the last action moved only a HUD strip, so `encode` should ignore that region.\n"
+    "- If `step` keeps failing after several rewrites, the problem is usually `encode`, not `step`. Question what the objects are and whether hidden state exists that the grid never shows.\n"
+    "- If you cannot certify a model after several honest attempts, stop trying and play reactively for this level. A partial model is still useful for ruling actions out.\n"
+)
+
 COMPACT_TOOL_SESSION_ADDENDUM = (
     "\n\nTool session rules:\n"
     "- You have exactly one tool: `python`.\n"

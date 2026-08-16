@@ -57,6 +57,7 @@ from inference.agent.prompts import (
     MULTIMODAL_CONTEXT_ADDENDUM,
     TOOL_CALL_FORMAT_GUIDANCE,
     VISUAL_GAME_ADDENDUM,
+    WORLD_MODEL_ADDENDUM,
 )
 
 from inference.agent.vision_context import (
@@ -455,6 +456,7 @@ def _build_system_prompt(*, tool_output_tokens: int) -> str:
         prompt += MULTIMODAL_CONTEXT_ADDENDUM
     prompt += VISUAL_GAME_ADDENDUM
     prompt += PYTHON_ADDENDUM
+    prompt += WORLD_MODEL_ADDENDUM
     prompt += COMPACT_TOOL_SESSION_ADDENDUM.format(tool_output_tokens=tool_output_tokens)
     return prompt
 
@@ -1361,6 +1363,9 @@ class ToolAgent:
         if not summary:
             return
         if summary.get("level_transition") or summary.get("run_complete") or summary.get("game_over"):
+            # The induced world model (`_world_model_source`) deliberately survives
+            # a level transition: mechanics carry across levels even when layouts
+            # do not. Only the prose fields below are level-scoped.
             for key in (
                 "world_model",
                 "goal_model",
@@ -1390,6 +1395,42 @@ class ToolAgent:
             *lines,
             "- Revise any item above immediately if `current_frame` or `history` contradicts it.",
         ]
+
+    def _world_model_status_lines(self) -> list[str]:
+        """Render induced-model status for the prompt (safe on pre-upgrade pickles)."""
+        source = getattr(self, "_world_model_source", "") or ""
+        lines: list[str]
+        if not source.strip():
+            lines = [
+                "Induced world model: none saved yet. Write `encode(frame)` and "
+                "`step(state, action)` as a source string and pass it to `save_model(source)`."
+            ]
+        else:
+            lines = [
+                f"Induced world model: saved, {len(source.splitlines())} lines, "
+                "reloaded into every `python` call automatically."
+            ]
+            backtest = getattr(self, "_last_backtest", None)
+            if isinstance(backtest, dict) and backtest.get("total"):
+                status = "certified" if backtest.get("certified") else "not certified"
+                lines.append(
+                    f"Last backtest: {backtest.get('exact', 0)}/{backtest.get('total', 0)} "
+                    f"transitions reproduced exactly ({status})."
+                )
+                mismatch = backtest.get("first_mismatch")
+                if isinstance(mismatch, dict):
+                    lines.append(
+                        f"First mismatch at transition {mismatch.get('index')} "
+                        f"on action {mismatch.get('action')}."
+                    )
+            else:
+                lines.append("Last backtest: never run. Call `run_backtest()` before trusting this model.")
+        world_model_error = getattr(self, "_world_model_error", "") or ""
+        if world_model_error:
+            lines.append(
+                "Your saved model failed to reload and has been discarded. Write a fresh one."
+            )
+        return lines
 
     # --- Prompt construction: the per-turn user message ---------------------
 
@@ -1493,6 +1534,7 @@ class ToolAgent:
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
         lines.extend(self._summarized_knowledge_lines())
+        lines.extend(self._world_model_status_lines())
         lines.append("end of world model. ")
         if action_num == 0:
             lines.append(
@@ -2110,6 +2152,14 @@ class ToolAgent:
 
         append_transcript("SYSTEM PROMPT", self._system_prompt)
         append_transcript("USER PROMPT", user_prompt)
+
+        backtest_status = getattr(self, "_last_backtest", None)
+        if isinstance(backtest_status, dict):
+            append_transcript(
+                "WORLD MODEL",
+                f"backtest: {backtest_status.get('exact', 0)}/{backtest_status.get('total', 0)} "
+                f"certified={bool(backtest_status.get('certified'))}",
+            )
 
         previous_history_messages = list(self._history_messages)
         preserve_history = True
