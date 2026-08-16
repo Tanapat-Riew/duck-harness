@@ -60,6 +60,15 @@ def test_status_reports_a_discarded_model_after_reload_failure():
     assert any("failed to reload" in line and "discarded" in line for line in lines)
 
 
+def test_a_discarded_model_replaces_the_none_saved_yet_line():
+    agent = _agent()
+    agent._world_model_source = ""
+    agent._last_backtest = None
+    agent._world_model_error = "NameError: name 'foo' is not defined"
+    lines = agent._world_model_status_lines()
+    assert not any("none saved yet" in line for line in lines)
+
+
 def test_status_lists_dead_actions():
     agent = _agent()
     agent._world_model_source = ""

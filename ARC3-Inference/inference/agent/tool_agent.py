@@ -1399,19 +1399,32 @@ class ToolAgent:
         ]
 
     def _world_model_status_lines(self) -> list[str]:
-        """Render induced-model status for the prompt (safe on pre-upgrade pickles)."""
+        """Render induced-model status for the prompt (safe on pre-upgrade pickles).
+
+        A pending reload error is rendered here and then cleared, so it is shown
+        exactly once no matter how many `python` calls the turn made. It replaces
+        the "none saved yet" line, which would be false in that state.
+        """
         source = getattr(self, "_world_model_source", "") or ""
+        world_model_error = getattr(self, "_world_model_error", "") or ""
         lines: list[str]
-        if not source.strip():
+        if world_model_error:
+            lines = [
+                "Your saved model failed to reload and has been discarded. Write a fresh one."
+            ]
+            self._world_model_error = ""
+        elif not source.strip():
             lines = [
                 "Induced world model: none saved yet. Write `encode(frame)` and "
                 "`step(state, action)` as a source string and pass it to `save_model(source)`."
             ]
         else:
-            lines = [
+            lines = []
+        if source.strip():
+            lines.append(
                 f"Induced world model: saved, {len(source.splitlines())} lines, "
                 "reloaded into every `python` call automatically."
-            ]
+            )
             backtest = getattr(self, "_last_backtest", None)
             if isinstance(backtest, dict) and backtest.get("total"):
                 status = "certified" if backtest.get("certified") else "not certified"
@@ -1427,11 +1440,6 @@ class ToolAgent:
                     )
             else:
                 lines.append("Last backtest: never run. Call `run_backtest()` before trusting this model.")
-        world_model_error = getattr(self, "_world_model_error", "") or ""
-        if world_model_error:
-            lines.append(
-                "Your saved model failed to reload and has been discarded. Write a fresh one."
-            )
         dead_actions = sorted(getattr(self, "_no_effect_actions", {}))
         if dead_actions:
             lines.append(
@@ -1440,6 +1448,35 @@ class ToolAgent:
                 + ". Do not re-test them without a reason."
             )
         return lines
+
+    def _apply_sandbox_world_model_result(self, sandbox_result: dict[str, Any]) -> None:
+        """Fold one sandbox run's world-model outcome into carried agent state.
+
+        This runs once per `python` call, not once per turn, so a reload error is
+        recorded as pending rather than cleared here: a later call in the same
+        turn must not erase it before the prompt has shown it. It is cleared
+        either by rendering (:meth:`_world_model_status_lines`) or by a fresh
+        model arriving, which resolves it.
+
+        A source the model did not have before arrives with no certification: the
+        previous backtest described the previous model.
+        """
+        saved_source = sandbox_result.get("world_model_source")
+        if isinstance(saved_source, str) and saved_source.strip():
+            if saved_source != (getattr(self, "_world_model_source", "") or ""):
+                self._last_backtest = None
+            self._world_model_source = saved_source
+            self._world_model_error = ""
+
+        world_model_error = sandbox_result.get("world_model_error")
+        if isinstance(world_model_error, str) and world_model_error.strip():
+            self._world_model_error = world_model_error
+            self._world_model_source = ""
+            self._last_backtest = None
+
+        backtest_report = sandbox_result.get("last_backtest")
+        if isinstance(backtest_report, dict) and backtest_report.get("ok"):
+            self._last_backtest = dict(backtest_report)
 
     def _record_action_effect(
         self,
@@ -1941,20 +1978,7 @@ class ToolAgent:
             action_handler=_handle_action,
         )
 
-        saved_source = sandbox_result.get("world_model_source")
-        if isinstance(saved_source, str) and saved_source.strip():
-            self._world_model_source = saved_source
-
-        world_model_error = sandbox_result.get("world_model_error")
-        if isinstance(world_model_error, str) and world_model_error.strip():
-            self._world_model_error = world_model_error
-            self._world_model_source = ""
-        else:
-            self._world_model_error = ""
-
-        backtest_report = sandbox_result.get("last_backtest")
-        if isinstance(backtest_report, dict) and backtest_report.get("ok"):
-            self._last_backtest = dict(backtest_report)
+        self._apply_sandbox_world_model_result(sandbox_result)
 
         action_results = [
             item
