@@ -382,6 +382,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "error": "world model must define callable " + ", ".join(missing),
                 }
             saved_world_model["source"] = text
+            runtime_globals["world_model_error"] = None
             for name, value in namespace.items():
                 if name != "__builtins__":
                     runtime_globals[name] = value
@@ -610,7 +611,7 @@ def run_sandboxed_python(
                     "error": str(message.get("error", "") or ""),
                     "action_results": list(message.get("action_results") or host_action_results),
                     "world_model_source": str(message.get("world_model_source", "") or ""),
-                    "world_model_error": message.get("world_model_error"),
+                    "world_model_error": str(message.get("world_model_error") or ""),
                 }
 
             _wait_for_process_exit(process)

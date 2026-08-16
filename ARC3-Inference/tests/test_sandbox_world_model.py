@@ -78,3 +78,13 @@ def test_a_stored_model_that_fails_to_reload_reports_the_error():
     outcome = _run("result = world_model_error", world_model_source="raise ValueError('stale model')\n")
     assert "stale model" in outcome["world_model_error"]
     assert outcome["world_model_source"] == ""
+
+
+def test_saving_a_good_model_clears_a_stale_reload_error():
+    outcome = _run(
+        f'result = save_model("""{CORRECT_MODEL}""")',
+        world_model_source="raise ValueError('stale model')\n",
+    )
+    assert outcome["result"]["ok"] is True
+    assert "def step(state, action):" in outcome["world_model_source"]
+    assert not outcome["world_model_error"]
