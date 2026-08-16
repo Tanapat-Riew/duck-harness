@@ -1164,6 +1164,7 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        self._world_model_source: str = ""
 
     # --- Setup & bookkeeping: session lifecycle and token accounting --------
 
@@ -1195,6 +1196,7 @@ class ToolAgent:
             self._last_step_summary = None
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
+            self._world_model_source = ""
 
     @property
     def total_tokens(self) -> int:
@@ -1772,6 +1774,7 @@ class ToolAgent:
                     if isinstance(persisted_action_result, dict)
                     else {}
                 ),
+                "world_model_source": getattr(self, "_world_model_source", ""),
             }
 
         terminal_action_result: dict[str, Any] | None = None
@@ -1844,6 +1847,10 @@ class ToolAgent:
             initial_state=_serialized_runtime_state(),
             action_handler=_handle_action,
         )
+
+        saved_source = sandbox_result.get("world_model_source")
+        if isinstance(saved_source, str) and saved_source.strip():
+            self._world_model_source = saved_source
 
         action_results = [
             item

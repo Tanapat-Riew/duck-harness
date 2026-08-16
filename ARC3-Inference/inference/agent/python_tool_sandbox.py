@@ -366,8 +366,47 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             _refresh_state(reply.get("state") or {})
             return action_result
 
+        saved_world_model = {"source": ""}
+
+        def save_model(source):
+            text = str(source or "")
+            namespace = {"__builtins__": runtime_globals["__builtins__"]}
+            try:
+                exec(compile(text, "<world_model>", "exec"), namespace, namespace)
+            except Exception as exc:
+                return {"ok": False, "error": _sanitize_exception(exc)}
+            missing = [name for name in ("encode", "step") if not callable(namespace.get(name))]
+            if missing:
+                return {
+                    "ok": False,
+                    "error": "world model must define callable " + ", ".join(missing),
+                }
+            saved_world_model["source"] = text
+            for name, value in namespace.items():
+                if name != "__builtins__":
+                    runtime_globals[name] = value
+            return {
+                "ok": True,
+                "defines": [
+                    name
+                    for name in ("encode", "step", "is_goal")
+                    if callable(namespace.get(name))
+                ],
+            }
+
+        runtime_globals["save_model"] = save_model
+
         runtime_globals["action"] = action
         _refresh_state(initial.get("state") or {})
+
+        stored_source = str((initial.get("state") or {}).get("world_model_source") or "")
+        runtime_globals["world_model_error"] = None
+        if stored_source:
+            try:
+                exec(compile(stored_source, "<world_model>", "exec"), runtime_globals, runtime_globals)
+                saved_world_model["source"] = stored_source
+            except Exception as exc:
+                runtime_globals["world_model_error"] = _sanitize_exception(exc)
 
         try:
             compiled = compile(str(initial.get("code", "")), "<python_tool>", "exec")
@@ -379,6 +418,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "stdout": stdout.getvalue(),
                     "result": _json_safe(runtime_globals.get("result")),
                     "action_results": _json_safe(action_results),
+                    "world_model_source": saved_world_model["source"],
                 }
             )
         except Exception as exc:
@@ -388,6 +428,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "error": _sanitize_exception(exc),
                     "stdout": stdout.getvalue(),
                     "action_results": _json_safe(action_results),
+                    "world_model_source": saved_world_model["source"],
                 }
             )
 
@@ -566,6 +607,7 @@ def run_sandboxed_python(
                     "result": message.get("result"),
                     "error": str(message.get("error", "") or ""),
                     "action_results": list(message.get("action_results") or host_action_results),
+                    "world_model_source": str(message.get("world_model_source", "") or ""),
                 }
 
             _wait_for_process_exit(process)
