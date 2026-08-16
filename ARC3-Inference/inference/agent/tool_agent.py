@@ -1,4 +1,39 @@
-"""Direct OpenAI-compatible tool-calling analyzer for ARC puzzle runs."""
+"""Direct OpenAI-compatible tool-calling analyzer for ARC puzzle runs.
+
+This module implements :class:`ToolAgent`, the solver that plays one ARC-AGI
+game by repeatedly prompting an OpenAI-compatible model and letting it act
+through a single sandboxed ``python`` tool. Each :meth:`ToolAgent.analyze` call
+runs one turn: build the per-turn user prompt, call the model, execute its
+``python`` tool call, and loop until a real environment action is taken.
+Carried conversation history plus a self-summarized "world model" give the
+agent memory across turns; everything else here is prompt text, rendering,
+logging, and context-window budgeting in support of that loop.
+
+Section map (line numbers):
+
+  Section 1  (L74)  Configuration, environment readers, and markup parsing
+                      Module constants and env-var readers, plus recovery of
+                      tool calls emitted as `<tool_call>` markup.
+  Section 2  (L223)  Prompt text, action naming, and world-model extraction
+                      Turn state -> prompt text: action-name normalization,
+                      parsing the model's world-model note, system-prompt build.
+  Section 3  (L455)  Data structures
+                      Frozen dataclasses passed around the turn loop, incl. the
+                      read-only ASCII frame/history views given to the sandbox.
+  Section 4  (L514)  Frame/history views, token estimation, and model resolution
+  Section 5  (L647)  Transcript and value rendering
+                      Format `[LABEL]` transcript sections and render arbitrary
+                      values / tool calls / tool results as readable text.
+  Section 6  (L838)  Run-artifact paths and prompt/request logging
+  Section 7  (L1079)  ToolAgent — the analyzer, grouped internally into:
+                        - Setup & bookkeeping ................... L1160
+                        - Step summaries & world-model memory ... L1236
+                        - Prompt construction (user message) .... L1380
+                        - Model I/O (tool schema, completion) ... L1503
+                        - Python tool execution ................. L1590
+                        - Context management (history / trim) ... L1878
+                        - The turn loop: analyze() .............. L2014
+"""
 from __future__ import annotations
 
 import json
@@ -35,6 +70,14 @@ from inference.utils.openai_compat import build_chat_payload, build_headers
 
 log = logging.getLogger(__name__)
 
+# ============================================================================
+# Section 1: Configuration, environment readers, and markup parsing
+# ----------------------------------------------------------------------------
+# Module-level constants (model id, base URL, regexes), small helpers that read
+# tuning knobs from the environment, and the regex-based recovery of tool calls
+# that some models emit as `<tool_call>` markup instead of a structured field.
+# ============================================================================
+
 _LOCAL_ANALYZER_MODEL_ID = os.environ.get("LOCAL_ANALYZER_MODEL_ID", "")
 _LOCAL_ANALYZER_BASE_URL = os.environ.get("LOCAL_ANALYZER_BASE_URL", "http://127.0.0.1:1234/v1")
 _DEFAULT_ANALYZER_MODEL = os.environ.get(
@@ -53,6 +96,7 @@ _THINK_TAG_RE = re.compile(r"</?think>", flags=re.IGNORECASE)
 
 
 def _get_env_int(name: str, default: int) -> int:
+    """Return env var ``name`` parsed as int, or ``default`` if unset/invalid."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -63,6 +107,7 @@ def _get_env_int(name: str, default: int) -> int:
 
 
 def _get_env_bool(name: str, default: bool) -> bool:
+    """Return env var ``name`` as a bool (1/true/yes/on vs 0/false/no/off)."""
     raw = os.environ.get(name, "").strip().lower()
     if not raw:
         return default
@@ -74,6 +119,7 @@ def _get_env_bool(name: str, default: bool) -> bool:
 
 
 def _contains_tool_call_markup(*chunks: str) -> bool:
+    """Report whether any chunk contains `<tool_call>`/`<function=` markup."""
     for chunk in chunks:
         lowered = chunk.lower()
         if "<tool_call" in lowered or "<function=" in lowered:
@@ -82,6 +128,7 @@ def _contains_tool_call_markup(*chunks: str) -> bool:
 
 
 def _strip_tool_call_markup(text: str) -> str:
+    """Remove any `<tool_call>...</tool_call>` blocks from free text."""
     if not text.strip():
         return ""
     stripped = _TOOL_CALL_BLOCK_RE.sub("", text)
@@ -89,6 +136,12 @@ def _strip_tool_call_markup(text: str) -> str:
 
 
 def _recover_tool_calls_from_markup(*chunks: str) -> list[dict[str, Any]]:
+    """Parse `<tool_call>` markup into structured tool-call dicts.
+
+    Some models emit tool calls as inline XML-ish markup inside their text
+    instead of the OpenAI ``tool_calls`` field. This reconstructs the
+    equivalent structured calls (deduplicated) so they can still be executed.
+    """
     recovered: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for chunk in chunks:
@@ -125,6 +178,7 @@ def _recover_tool_calls_from_markup(*chunks: str) -> list[dict[str, Any]]:
 
 
 def _get_env_float(name: str, default: float) -> float:
+    """Return env var ``name`` parsed as float, or ``default`` if unset/invalid."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -164,7 +218,18 @@ _PYTHON_TOOL_DESCRIPTION = (
     "Use `print(...)` for compact output or assign final data to `result`."
 )
 
+
+# ============================================================================
+# Section 2: Prompt text, action naming, and world-model extraction
+# ----------------------------------------------------------------------------
+# Helpers that turn raw state into prompt-ready text: normalizing valid-action
+# names, describing terminal outcomes, parsing the model's free-text
+# "scientist note" (World model / Goal model / Plan / ...) into a structured
+# dict, and assembling the static system prompt from the prompt addendums.
+# ============================================================================
+
 def _normalize_valid_actions(valid_actions: list[str] | None) -> list[str]:
+    """Canonicalize valid-action names to model-facing form, deduplicated."""
     names: list[str] = []
     for value in valid_actions or []:
         engine_name = to_engine_action(value)
@@ -175,6 +240,7 @@ def _normalize_valid_actions(valid_actions: list[str] | None) -> list[str]:
 
 
 def _format_valid_action_line(valid_actions: list[str] | None) -> str:
+    """Render valid actions as a comma-separated line, or "unknown" if none."""
     names = _normalize_valid_actions(valid_actions)
     if not names:
         return "unknown"
@@ -182,6 +248,7 @@ def _format_valid_action_line(valid_actions: list[str] | None) -> str:
 
 
 def _terminal_action_reason(result: dict[str, Any]) -> str | None:
+    """Return the terminal-state label for an action result, or None if ongoing."""
     if result.get("run_complete"):
         return "run_complete"
     if result.get("game_over"):
@@ -194,6 +261,7 @@ def _terminal_action_reason(result: dict[str, Any]) -> str | None:
 
 
 def _terminal_action_stop_detail(reason: str | None) -> str:
+    """Explain, for the transcript, why a batch stopped at a terminal state."""
     if reason == "run_complete":
         return "No further actions were executed because the run is already complete."
     if reason == "game_over":
@@ -212,10 +280,12 @@ def _terminal_action_stop_detail(reason: str | None) -> str:
 
 
 def _display_action_number(action_num: int) -> int:
+    """Convert a 0-based action index to a 1-based number for display."""
     return max(1, int(action_num) + 1)
 
 
 def _normalize_summary_text(value: Any, *, max_chars: int | None = 280) -> str:
+    """Collapse whitespace and truncate text to ``max_chars`` with a note."""
     text = " ".join(str(value or "").split())
     if max_chars is None or max_chars <= 0 or len(text) <= max_chars:
         return text
@@ -224,6 +294,12 @@ def _normalize_summary_text(value: Any, *, max_chars: int | None = 280) -> str:
 
 
 def _extract_labeled_blocks(content: str, labels: list[str]) -> dict[str, str]:
+    """Split free text into sections keyed by leading `Label:` lines.
+
+    Lines beginning ``Label:`` (optionally bulleted) start a block; subsequent
+    non-empty lines accumulate into it until the next recognized label.
+    Returns only labels that captured non-empty content.
+    """
     normalized_labels = {label.lower(): label for label in labels}
     targets = tuple(f"{label.lower()}:" for label in labels)
     extracted: dict[str, list[str]] = {label: [] for label in labels}
@@ -261,6 +337,12 @@ def _extract_labeled_blocks(content: str, labels: list[str]) -> dict[str, str]:
 
 
 def _extract_scientist_note(content: str) -> dict[str, str]:
+    """Parse the model's world-model note into the standard knowledge dict.
+
+    Recognizes the canonical labels (World model, Goal model, Plan, ...) plus
+    a few aliases (Hypothesis -> world_model, History check -> recent_findings,
+    Next test -> current_plan) so slightly-off phrasings still register.
+    """
     if not content.strip():
         return {}
     extracted = _extract_labeled_blocks(
@@ -297,6 +379,7 @@ def _extract_scientist_note(content: str) -> dict[str, str]:
 
 
 def _empty_world_model() -> dict[str, str]:
+    """Return a fresh, all-empty world-model/knowledge dict."""
     return {
         "world_model": "",
         "goal_model": "",
@@ -309,10 +392,12 @@ def _empty_world_model() -> dict[str, str]:
 
 
 def _request_tool_choice(tools: list[dict[str, Any]] | None) -> str | None:
+    """Return the `tool_choice` value ("auto" when tools exist, else None)."""
     return "auto" if tools else None
 
 
 def _trim_log_text(text: str, *, max_chars: int = _RESPONSE_META_MAX_CHARS) -> str:
+    """Truncate log text to ``max_chars``, appending a truncation note."""
     stripped = text.strip()
     if len(stripped) <= max_chars:
         return stripped
@@ -330,6 +415,7 @@ def _format_model_response_meta(
     recovered_tool_calls_from_markup: bool,
     malformed_argument_errors: list[str],
 ) -> str:
+    """Format a compact `MODEL RESPONSE META` block for the transcript."""
     lines = [
         f"finish_reason: {finish_reason or '(empty)'}",
         f"tool_call_count: {len(tool_calls)}",
@@ -348,6 +434,12 @@ def _format_model_response_meta(
 
 
 def _build_system_prompt(*, tool_output_tokens: int) -> str:
+    """Assemble the static system prompt from the prompt addendums.
+
+    Concatenates the base role line with the game-overview, runtime-state,
+    (optional) multimodal, visual-game, python-tool, and compact-session
+    addendums. Built once per session and reused every turn.
+    """
     prompt = "You are a coding agent solving a grid-based puzzle game."
     prompt += GAME_OVERVIEW_ADDENDUM
     prompt += STRUCTURED_RUNTIME_STATE_ADDENDUM
@@ -359,8 +451,17 @@ def _build_system_prompt(*, tool_output_tokens: int) -> str:
     return prompt
 
 
+# ============================================================================
+# Section 3: Data structures
+# ----------------------------------------------------------------------------
+# Frozen dataclasses passed between the turn loop and its helpers: the resolved
+# model endpoint, the per-turn result, a single tool-dispatch outcome, and the
+# read-only ASCII frame/history views handed to sandboxed Python code.
+# ============================================================================
+
 @dataclass(frozen=True)
 class AnalyzerModelConfig:
+    """Resolved model endpoint: provider, base URL, and model id."""
     provider: str
     base_url: str
     model_id: str
@@ -368,6 +469,7 @@ class AnalyzerModelConfig:
 
 @dataclass(frozen=True)
 class AnalyzerTurnResult:
+    """Outcome of one `analyze()` turn returned to the runner."""
     step_executed: bool
     retryable_failure: bool = False
     reasoning: str = ""
@@ -376,12 +478,14 @@ class AnalyzerTurnResult:
 
 @dataclass(frozen=True)
 class _ToolDispatchResult:
+    """Result of dispatching one tool call: rendered content + did-it-act flag."""
     content: str
     step_executed: bool = False
 
 
 @dataclass(frozen=True)
 class _AsciiFrameView:
+    """Read-only ASCII view of a frame exposed to sandboxed Python code."""
     ascii: str
     step: int
     level: int
@@ -396,6 +500,7 @@ class _AsciiFrameView:
 
 @dataclass(frozen=True)
 class _AsciiHistoryEntryView:
+    """One history entry (action + resulting ASCII frame view)."""
     action: str
     frame: _AsciiFrameView
 
@@ -405,7 +510,16 @@ class _AsciiHistoryEntryView:
     __repr__ = __str__
 
 
+# ============================================================================
+# Section 4: Frame/history views, token estimation, and model resolution
+# ----------------------------------------------------------------------------
+# Convert runtime frames into the restricted ASCII views (and JSON payloads)
+# handed to the sandbox, estimate token counts for context budgeting, and
+# resolve/rewrite the analyzer model endpoint (including Docker host fixups).
+# ============================================================================
+
 def _to_ascii_frame_view(frame: Frame | None) -> _AsciiFrameView | None:
+    """Wrap a runtime ``Frame`` in an immutable ASCII view (None passes through)."""
     if frame is None:
         return None
     return _AsciiFrameView(
@@ -417,6 +531,7 @@ def _to_ascii_frame_view(frame: Frame | None) -> _AsciiFrameView | None:
 
 
 def _to_ascii_history_views(history_entries: list[HistoryEntry]) -> list[_AsciiHistoryEntryView]:
+    """Convert history entries to ASCII views, dropping any without a frame."""
     views: list[_AsciiHistoryEntryView] = []
     for entry in history_entries:
         frame_view = _to_ascii_frame_view(entry.frame)
@@ -427,6 +542,7 @@ def _to_ascii_history_views(history_entries: list[HistoryEntry]) -> list[_AsciiH
 
 
 def _ascii_frame_view_payload(frame: Frame | None) -> dict[str, Any] | None:
+    """Serialize a frame's ASCII view (plus raw grid) to a JSON-safe dict."""
     view = _to_ascii_frame_view(frame)
     if view is None:
         return None
@@ -440,6 +556,7 @@ def _ascii_frame_view_payload(frame: Frame | None) -> dict[str, Any] | None:
 
 
 def _ascii_history_view_payload(history_entries: list[HistoryEntry]) -> list[dict[str, Any]]:
+    """Serialize history entries to JSON-safe {action, frame} dicts."""
     payload: list[dict[str, Any]] = []
     for entry in history_entries:
         frame_payload = _ascii_frame_view_payload(entry.frame)
@@ -450,6 +567,7 @@ def _ascii_history_view_payload(history_entries: list[HistoryEntry]) -> list[dic
 
 
 def _format_action_span(start_action_num: int | None, end_action_num: int | None) -> str | None:
+    """Render an action range as "N" or "N-M", or None if unavailable."""
     if start_action_num is None or end_action_num is None:
         return None
     if start_action_num <= 0 or end_action_num <= 0:
@@ -460,6 +578,7 @@ def _format_action_span(start_action_num: int | None, end_action_num: int | None
 
 
 def _estimate_tokens(value: Any) -> int:
+    """Rough token estimate (~3 chars/token) of a JSON-rendered value."""
     try:
         rendered = json.dumps(value, ensure_ascii=True, sort_keys=True, default=str)
     except TypeError:
@@ -468,6 +587,7 @@ def _estimate_tokens(value: Any) -> int:
 
 
 def _host_accessible_base_url(base_url: str) -> str:
+    """Rewrite `host.docker.internal` URLs to 127.0.0.1 for direct host access."""
     parsed = urlparse(base_url)
     hostname = (parsed.hostname or "").strip().lower()
     if hostname != "host.docker.internal":
@@ -479,6 +599,12 @@ def _host_accessible_base_url(base_url: str) -> str:
 
 
 def _resolve_analyzer_model(model: str) -> AnalyzerModelConfig:
+    """Resolve a model name/preset into a concrete provider/base_url/model_id.
+
+    Accepts the ``local`` preset family (driven by ``LOCAL_ANALYZER_*`` env
+    vars) or a direct model id (driven by ``OPENAI_*`` env vars). Raises
+    ``ValueError`` when the required base URL or model id is missing.
+    """
     requested = (model or "").strip()
     lowered = requested.lower()
     if lowered in {"local", "local-qwen", "qwen-local", "qwen"}:
@@ -517,7 +643,16 @@ def _resolve_analyzer_model(model: str) -> AnalyzerModelConfig:
     return AnalyzerModelConfig(provider=provider, base_url=base_url, model_id=requested)
 
 
+# ============================================================================
+# Section 5: Transcript and value rendering
+# ----------------------------------------------------------------------------
+# Append/format `[LABEL]` transcript sections and render arbitrary values
+# (dicts, lists, JSON-ish strings, tool calls, and tool results) into the
+# compact human-readable text shown in the analyzer transcript and viewer.
+# ============================================================================
+
 def _append_transcript_section(log_path: Path, label: str, content: str) -> None:
+    """Append a `[label]` section with ``content`` to the transcript file."""
     rendered_content = content.strip()
     if not rendered_content:
         return
@@ -528,6 +663,7 @@ def _append_transcript_section(log_path: Path, label: str, content: str) -> None
 
 
 def _render_transcript_section(label: str, content: str) -> str:
+    """Return a `[label]` section as a string (empty if content is blank)."""
     rendered_content = content.strip()
     if not rendered_content:
         return ""
@@ -535,6 +671,7 @@ def _render_transcript_section(label: str, content: str) -> str:
 
 
 def _json_like_payload(value: Any) -> Any | None:
+    """Parse a string that looks like JSON (starts with { or [), else None."""
     if not isinstance(value, str):
         return None
     stripped = value.strip()
@@ -547,12 +684,14 @@ def _json_like_payload(value: Any) -> Any | None:
 
 
 def _render_scalar_value(value: Any) -> str:
+    """Render a scalar: strings as-is, everything else as compact JSON."""
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=True)
 
 
 def _render_human_readable_lines(value: Any, *, indent: int = 0) -> list[str]:
+    """Recursively render a value as indented, YAML-like text lines."""
     prefix = " " * indent
     if isinstance(value, dict):
         if not value:
@@ -596,10 +735,12 @@ def _render_human_readable_lines(value: Any, *, indent: int = 0) -> list[str]:
 
 
 def _render_human_readable_value(value: Any) -> str:
+    """Render a value as a single YAML-like block string."""
     return "\n".join(_render_human_readable_lines(value))
 
 
 def _render_jsonish_text(value: Any) -> str:
+    """Render JSON-ish input as readable text, falling back to plain text."""
     parsed = _json_like_payload(value)
     if parsed is not None:
         return _render_human_readable_value(parsed)
@@ -607,6 +748,7 @@ def _render_jsonish_text(value: Any) -> str:
 
 
 def _render_tool_parameter_text(value: Any) -> str:
+    """Render a single tool-call parameter value as markup-ready text."""
     if isinstance(value, str):
         return value.rstrip("\n")
     if isinstance(value, bool):
@@ -619,6 +761,7 @@ def _render_tool_parameter_text(value: Any) -> str:
 
 
 def _normalize_tool_call_arguments(arguments: Any) -> dict[str, Any]:
+    """Coerce tool-call arguments (dict, JSON string, or markup) to a dict."""
     if isinstance(arguments, dict):
         return json.loads(json.dumps(arguments))
     if isinstance(arguments, str):
@@ -639,6 +782,7 @@ def _normalize_tool_call_arguments(arguments: Any) -> dict[str, Any]:
 
 
 def _render_tool_call_markup(tool_name: str, arguments: Any) -> str:
+    """Render a tool call as `<tool_call>` markup for the transcript display."""
     name = str(tool_name or "").strip()
     if not name:
         return ""
@@ -660,6 +804,7 @@ def _render_tool_call_markup(tool_name: str, arguments: Any) -> str:
 
 
 def _render_tool_result_display(content: Any) -> str:
+    """Render a tool result for display, surfacing stdout/error/result cleanly."""
     parsed = _json_like_payload(content) if isinstance(content, str) else (content if isinstance(content, dict) else None)
     if isinstance(parsed, dict):
         stdout = str(parsed.get("stdout", "") or "").rstrip("\n")
@@ -689,7 +834,21 @@ def _render_tool_result_display(content: Any) -> str:
     return _render_jsonish_text(content)
 
 
+# ============================================================================
+# Section 6: Run-artifact paths and prompt/request logging
+# ----------------------------------------------------------------------------
+# Locate a run's output directory from the runtime-state path, derive per-game
+# artifact filenames, and write the human-readable prompt log (prompts/*.log)
+# and the machine-readable request snapshots (requests JSONL) for each turn.
+# ============================================================================
+
 def _resolve_run_artifact_location(state_path: Path) -> tuple[Path, str | None]:
+    """Locate a run's output root and per-game stem from its state path.
+
+    When multiple games share an ``artifacts/`` directory, returns the run root
+    plus the game stem so artifacts can be named per game; otherwise the stem
+    is None and artifacts live directly under the state file's directory.
+    """
     parent = state_path.parent
     if parent.name == "artifacts" and parent.parent != parent:
         run_root = parent.parent
@@ -711,6 +870,7 @@ def _resolve_named_run_artifact(
     per_game_suffix: str,
     directory_name: str | None = None,
 ) -> Path:
+    """Build an artifact path, per-game when a stem exists else the default name."""
     run_root, game_stem = _resolve_run_artifact_location(state_path)
     output_root = run_root / directory_name if directory_name else run_root
     if game_stem:
@@ -719,6 +879,7 @@ def _resolve_named_run_artifact(
 
 
 def _render_prompt_log_message(message: dict[str, Any]) -> str:
+    """Render one chat message (content, reasoning, tool calls) for the prompt log."""
     role = str(message.get("role", "")).strip().upper() or "UNKNOWN"
     header = f"[{role}]"
     tool_call_id = str(message.get("tool_call_id", "")).strip()
@@ -761,6 +922,7 @@ def _render_prompt_log_message(message: dict[str, Any]) -> str:
 
 
 def _resolve_prompt_log_path(state_path: Path) -> Path:
+    """Path to the human-readable prompt log (`prompts/<game>.log`)."""
     return _resolve_named_run_artifact(
         state_path,
         default_name="prompt.log",
@@ -770,6 +932,7 @@ def _resolve_prompt_log_path(state_path: Path) -> Path:
 
 
 def _resolve_request_log_path(state_path: Path) -> Path:
+    """Path to the machine-readable request log (`<game>_requests.jsonl`)."""
     return _resolve_named_run_artifact(
         state_path,
         default_name="requests.jsonl",
@@ -789,6 +952,7 @@ def _append_request_snapshot(
     action: int | None = None,
     request_index_within_turn: int | None = None,
 ) -> None:
+    """Append one request snapshot (messages, tools, metadata) as a JSONL line."""
     payload = {
         "messages": messages,
         "tools": tools or [],
@@ -828,6 +992,12 @@ def _write_prompt_log_snapshot(
     tool_choice: str | None,
     transcript: str,
 ) -> None:
+    """Overwrite the prompt log with the latest full model-call snapshot.
+
+    Unlike the append-only request JSONL, this file always holds only the most
+    recent call: model/endpoint metadata, available tools, the rendered model
+    input (all messages), and the turn transcript so far.
+    """
     rendered_messages = "\n\n".join(_render_prompt_log_message(message) for message in messages)
     rendered_tools: list[str] = []
     for tool in tools or []:
@@ -861,6 +1031,7 @@ def _write_prompt_log_snapshot(
 
 
 def _normalize_message_content(content: Any) -> str:
+    """Flatten message content to text, stripping `<think>` tags and blanks."""
     def _strip_think_tags(text: str) -> str:
         cleaned = _THINK_TAG_RE.sub("", text)
         cleaned = "\n".join(line for line in cleaned.splitlines() if line.strip())
@@ -878,6 +1049,7 @@ def _normalize_message_content(content: Any) -> str:
 
 
 def _extract_reasoning_text(message: dict[str, Any]) -> str:
+    """Pull reasoning text from `reasoning`/`reasoning_content`, normalized."""
     reasoning = message.get("reasoning")
     if reasoning in (None, ""):
         reasoning = message.get("reasoning_content", "")
@@ -885,6 +1057,7 @@ def _extract_reasoning_text(message: dict[str, Any]) -> str:
 
 
 def _is_context_length_error(exc: BaseException) -> bool:
+    """Heuristically detect a context-length-exceeded error from its message."""
     message = str(exc).lower()
     return (
         "maximum context length" in message
@@ -896,13 +1069,35 @@ def _is_context_length_error(exc: BaseException) -> bool:
 
 @dataclass
 class _ChatCompletionResult:
+    """Parsed chat-completion response: message, finish reason, token usage."""
     message: dict[str, Any]
     finish_reason: str = ""
     usage: dict[str, Any] | None = None
 
 
+# ============================================================================
+# Section 7: ToolAgent — the analyzer
+# ----------------------------------------------------------------------------
+# The stateful analyzer that drives one game. `analyze()` runs a turn: it
+# builds the user prompt, calls the model, and dispatches the `python` tool in
+# a loop until an action executes. Grouped internally into:
+#   - Setup & bookkeeping: __init__, session, and token accounting.
+#   - Step summaries & world-model memory carried across turns.
+#   - Prompt construction: user message and per-turn user prompt.
+#   - Model I/O: tool schema and the chat-completion request.
+#   - Python tool execution: sandbox run and result compaction.
+#   - Context management: history persistence and message trimming.
+#   - The turn loop: analyze().
+# ============================================================================
+
 class ToolAgent:
-    """Direct tool-calling analyzer compatible with OpenAI-style endpoints."""
+    """Direct tool-calling analyzer compatible with OpenAI-style endpoints.
+
+    One instance drives a single game across many turns. It owns the system
+    prompt, the carried-over conversation history, the summarized "world
+    model" memory, token accounting, and all context-window budgeting. The
+    game runner calls :meth:`analyze` once per environment action.
+    """
 
     def __init__(
         self,
@@ -914,6 +1109,12 @@ class ToolAgent:
         base_url: str | None = None,
         provider: str | None = None,
     ) -> None:
+        """Resolve the model endpoint and precompute tuning/budget parameters.
+
+        Explicit ``base_url``/``provider`` override the resolved preset. Derives
+        timeouts, tool-step limits, output-token reserves, the static system
+        prompt, and the context-window budget used when trimming messages.
+        """
         resolved_model = _resolve_analyzer_model(model)
         if base_url is not None or provider is not None:
             resolved_model = AnalyzerModelConfig(
@@ -956,7 +1157,10 @@ class ToolAgent:
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
 
+    # --- Setup & bookkeeping: session lifecycle and token accounting --------
+
     def _headers(self) -> dict[str, str]:
+        """Build request headers, resolving the API key from known env vars."""
         api_key = (
             self._api_key
             or os.environ.get("LOCAL_ANALYZER_API_KEY", "").strip()
@@ -973,6 +1177,7 @@ class ToolAgent:
         )
 
     def _ensure_session(self, state_path: Path) -> None:
+        """Reset per-game state when the runtime directory changes (new game)."""
         runtime_dir = state_path.parent
         if self._session_runtime_dir != runtime_dir:
             self._session_runtime_dir = runtime_dir
@@ -985,13 +1190,20 @@ class ToolAgent:
 
     @property
     def total_tokens(self) -> int:
+        """Total tokens (prompt + completion) accumulated this session."""
         return max(0, int(self._session_total_tokens))
 
     @property
     def generated_tokens(self) -> int:
+        """Completion/output tokens generated this session."""
         return max(0, int(self._session_generated_tokens))
 
     def _accumulate_usage_tokens(self, usage: dict[str, Any] | None) -> None:
+        """Add one response's usage into the session token counters.
+
+        Tolerates the differing field names across providers, and reconstructs
+        a total from prompt+completion fields when ``total_tokens`` is absent.
+        """
         if not isinstance(usage, dict):
             return
         generated_token_count = 0
@@ -1021,7 +1233,15 @@ class ToolAgent:
                 continue
         self._session_total_tokens += token_count
 
+    # --- Step summaries & world-model memory carried across turns -----------
+
     def _summarize_step_sequence(self, action_results: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Condense a batch of executed actions into a single step summary.
+
+        Aggregates executed count/names, the action-number span, level, and
+        terminal/board-change flags. Returns None if nothing actually executed.
+        This summary feeds the next turn's user prompt.
+        """
         if not action_results:
             return None
         executed_results = [item for item in action_results if item.get("executed")]
@@ -1068,6 +1288,7 @@ class ToolAgent:
         }
 
     def _describe_last_outcome(self, summary: dict[str, Any] | None) -> str:
+        """Render a step summary as a natural-language outcome line for the prompt."""
         if not summary:
             return ""
         span = _format_action_span(
@@ -1103,6 +1324,12 @@ class ToolAgent:
         return " ".join(pieces)
 
     def _update_summarized_knowledge_from_assistant(self, content: str) -> None:
+        """Merge the model's world-model note into carried knowledge.
+
+        Parses labeled blocks (World model / Goal model / Plan / ...) from
+        assistant text and overwrites any non-empty fields, so the memory
+        re-injected next turn reflects the model's latest revision.
+        """
         note = _extract_scientist_note(content)
         if not note:
             return
@@ -1111,6 +1338,11 @@ class ToolAgent:
                 self._summarized_knowledge[key] = value
 
     def _update_summarized_knowledge_from_step_summary(self) -> None:
+        """Clear level-scoped knowledge when a level/run boundary was crossed.
+
+        Cross-level notes are preserved; per-level fields are reset so the model
+        re-grounds on the new scene instead of carrying stale assumptions.
+        """
         summary = self._last_step_summary
         if not summary:
             return
@@ -1126,6 +1358,7 @@ class ToolAgent:
                 self._summarized_knowledge[key] = ""
 
     def _summarized_knowledge_lines(self) -> list[str]:
+        """Render carried world-model memory as prompt lines (empty if none)."""
         entries = [
             ("World model", self._summarized_knowledge.get("world_model", "")),
             ("Goal model", self._summarized_knowledge.get("goal_model", "")),
@@ -1144,7 +1377,10 @@ class ToolAgent:
             "- Revise any item above immediately if `current_frame` or `history` contradicts it.",
         ]
 
+    # --- Prompt construction: the per-turn user message ---------------------
+
     def _build_user_message(self, user_prompt: str, current_frame: Frame | None) -> dict[str, Any]:
+        """Wrap the user prompt as a chat message, attaching the grid image if enabled."""
         image_part = current_grid_image_part(current_frame)
         if image_part is None:
             return {"role": "user", "content": user_prompt}
@@ -1167,6 +1403,15 @@ class ToolAgent:
         history_entries: list[HistoryEntry] | None = None,
         previous_step_summary: dict[str, Any] | None = None,
     ) -> str:
+        """Compose the dynamic per-turn user prompt text.
+
+        Assembled fresh each turn as a list of lines: the previous step's
+        outcome, the current step/level state, the valid actions, the fixed
+        `python`-tool contract, the carried world-model memory
+        (:meth:`_summarized_knowledge_lines`), and turn-specific guidance.
+        Returns the joined prompt string (later wrapped by
+        :meth:`_build_user_message`).
+        """
         history_entries = history_entries or []
         current_step = max(current_frame.step if current_frame is not None else 0, max(0, action_num)) + 1
         current_level = current_frame.level if current_frame is not None else 1
@@ -1255,7 +1500,10 @@ class ToolAgent:
             lines.append("If you use MOUSE, include integer row and col arguments.")
         return "\n".join(lines)
 
+    # --- Model I/O: tool schema and the chat-completion request -------------
+
     def _tools(self, state_path: Path) -> list[dict[str, Any]]:
+        """Return the single-tool schema (`python`) advertised to the model."""
         self._ensure_session(state_path)
         return [
             {
@@ -1286,6 +1534,12 @@ class ToolAgent:
         tools: list[dict[str, Any]] | None,
         request_timeout_seconds: float | None = None,
     ) -> _ChatCompletionResult:
+        """POST one chat-completion request and return the parsed result.
+
+        Builds the provider-specific payload, sends it to the model endpoint,
+        raises ``requests.RequestException`` (with response detail) on error or
+        empty choices, and returns the message, finish reason, and usage.
+        """
         payload = build_chat_payload(
             provider=self._model.provider,
             model=self._model.model_id,
@@ -1333,13 +1587,17 @@ class ToolAgent:
             usage=payload.get("usage"),
         )
 
+    # --- Python tool execution: sandbox run and result compaction -----------
+
     def _trim_tool_text(self, text: str) -> tuple[str, bool]:
+        """Truncate tool text to the output budget; return (text, was_truncated)."""
         if len(text) <= self._tool_output_chars:
             return text, False
         omitted = len(text) - self._tool_output_chars
         return f"{text[:self._tool_output_chars]}\n... [truncated {omitted} chars]", True
 
     def _summarize_planned_actions(self, value: Any) -> Any:
+        """Recursively replace bulky `planned_actions` lists with count fields."""
         if isinstance(value, dict):
             compacted = {
                 key: self._summarize_planned_actions(item)
@@ -1361,6 +1619,7 @@ class ToolAgent:
         return value
 
     def _render_tool_payload(self, payload: dict[str, Any], *, truncate_fields: tuple[str, ...] = ()) -> str:
+        """Compact and JSON-render a tool payload, truncating the named fields."""
         result = self._summarize_planned_actions(dict(payload))
         truncated = False
         for field in truncate_fields:
@@ -1376,6 +1635,12 @@ class ToolAgent:
         return json.dumps(result, indent=2)
 
     def _normalize_python_actions(self, value: Any) -> list[dict[str, Any]]:
+        """Validate/normalize the `action(...)` argument into action dicts.
+
+        Accepts a string, an action dict, or a list of either. Rejects empty
+        actions, missing `action` fields, and legacy MOUSE x/y coordinates
+        (row/col are required instead).
+        """
         if isinstance(value, str):
             items = [value]
         elif isinstance(value, dict):
@@ -1414,6 +1679,7 @@ class ToolAgent:
         return normalized
 
     def _compact_action_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Reduce a raw environment step result to the fields the model needs."""
         compact = {
             "executed": bool(payload.get("executed")),
             "action_num": payload.get("action_num"),
@@ -1451,6 +1717,15 @@ class ToolAgent:
         return compact
 
     def _run_python_tool(self, state_path: Path, arguments: dict[str, Any]) -> _ToolDispatchResult:
+        """Execute the model's `python` snippet in the sandbox and render its result.
+
+        Loads runtime state, exposes it plus an ``action(actions)`` handler to
+        the sandbox, and runs the code. ``action()`` steps the environment via
+        the step callback (short-circuiting once a terminal state is reached).
+        Afterwards it compacts stdout/result, and—if any action executed—
+        updates the carried step summary and world-model memory. The returned
+        :class:`_ToolDispatchResult` flags whether a real action ran.
+        """
         self._ensure_session(state_path)
         code = str(arguments.get("code", "")).rstrip()
         if not code:
@@ -1468,6 +1743,7 @@ class ToolAgent:
             next_valid_actions: list[str] | None = None,
             last_action_result: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
+            """Snapshot the current frame/history/valid-actions for the sandbox."""
             refreshed_frame, refreshed_history = load_runtime_state(state_path)
             current_frame_payload = _ascii_frame_view_payload(refreshed_frame)
             if isinstance(next_valid_actions, list):
@@ -1493,6 +1769,11 @@ class ToolAgent:
         terminal_action_result: dict[str, Any] | None = None
 
         def _handle_action(actions: list[dict[str, Any]]) -> dict[str, Any]:
+            """Sandbox `action(...)` bridge: step the env and return the outcome.
+
+            Once a terminal state has been hit this returns a not-executed
+            result instead of stepping again, so a batch stops cleanly.
+            """
             nonlocal terminal_action_result
             if self._step_env_callback is None:
                 raise RuntimeError("action(actions) is not available in this session.")
@@ -1588,10 +1869,13 @@ class ToolAgent:
         )
 
     def _dispatch_tool(self, state_path: Path, name: str, arguments: dict[str, Any]) -> _ToolDispatchResult:
+        """Route a tool call by name (only `python` is supported)."""
         self._ensure_session(state_path)
         if name == "python":
             return self._run_python_tool(state_path, arguments)
         return _ToolDispatchResult(json.dumps({"error": f"Unknown tool: {name}"}, indent=2))
+
+    # --- Context management: history persistence and message trimming -------
 
     def _estimate_request_input_tokens(
         self,
@@ -1599,6 +1883,7 @@ class ToolAgent:
         *,
         tools: list[dict[str, Any]] | None = None,
     ) -> int:
+        """Estimate the input-token cost of a full request (messages + tools)."""
         payload: dict[str, Any] = {"messages": messages}
         if tools:
             payload["tools"] = tools
@@ -1606,6 +1891,11 @@ class ToolAgent:
         return _estimate_tokens(payload)
 
     def _drop_oldest_history_block(self, history: list[dict[str, Any]], *, preserve_recent: int) -> bool:
+        """Drop the oldest conversational block in place; return whether it changed.
+
+        Removes a leading message and any dependent `tool` messages so the
+        history stays valid, never dropping below ``preserve_recent`` messages.
+        """
         removable = len(history) - preserve_recent
         if removable <= 0:
             return False
@@ -1627,6 +1917,11 @@ class ToolAgent:
         *,
         max_turns: int,
     ) -> list[dict[str, Any]]:
+        """Keep only the most recent ``max_turns`` assistant turns and their tail.
+
+        Walks from the end counting assistant messages, then drops any leading
+        orphan `tool` messages so the kept slice starts cleanly.
+        """
         if max_turns <= 0 or not messages:
             return []
 
@@ -1645,12 +1940,19 @@ class ToolAgent:
         return kept
 
     def _drop_until_first_user_message(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop leading non-user messages so history begins on a `user` turn."""
         trimmed = list(history)
         while trimmed and str(trimmed[0].get("role", "")).strip() != "user":
             trimmed.pop(0)
         return trimmed
 
     def _persistent_history_messages(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        """Derive the history to carry into the next turn from this turn's messages.
+
+        Trims to the context budget, drops the system message, keeps a bounded
+        number of recent assistant turns, and re-anchors on a leading `user`
+        message so the next request stays well-formed.
+        """
         trimmed = self._trim_messages_for_context(messages, tools=tools)
         if not trimmed:
             return []
@@ -1677,6 +1979,11 @@ class ToolAgent:
         preserve_recent: int = 1,
         extra_safety_tokens: int = 0,
     ) -> list[dict[str, Any]]:
+        """Drop oldest history until the request fits the context-token budget.
+
+        Always keeps the system message (index 0) and at least
+        ``preserve_recent`` trailing messages, then re-anchors on a `user` turn.
+        """
         if not messages:
             return []
         system_message = messages[0]
@@ -1695,6 +2002,7 @@ class ToolAgent:
         *,
         preserve_recent: int = 1,
     ) -> list[dict[str, Any]]:
+        """Force-drop one history block after a context-overflow error, if possible."""
         if not messages:
             return []
         system_message = messages[0]
@@ -1702,6 +2010,8 @@ class ToolAgent:
         if not self._drop_oldest_history_block(history, preserve_recent=max(0, preserve_recent)):
             return list(messages)
         return [system_message, *history]
+
+    # --- The turn loop ------------------------------------------------------
 
     def analyze(
         self,
@@ -1715,6 +2025,21 @@ class ToolAgent:
         request_timeout_seconds: float | None = None,
         should_stop: Callable[[], bool] | None = None,
     ) -> AnalyzerTurnResult | None:
+        """Run one analyzer turn: prompt the model and act via the `python` tool.
+
+        Builds the system+history+user message list, then loops model calls:
+        each response either supplies a `python` tool call (executed via
+        :meth:`_dispatch_tool`, with results appended to the conversation) or,
+        if the model failed to act, receives a follow-up nudge. The loop ends
+        when a real environment action executes, the tool-step limit is hit, or
+        a stop/time budget yields control. Along the way it writes the
+        transcript and prompt/request logs, retries once on context overflow,
+        and persists trimmed history for the next turn.
+
+        Returns an :class:`AnalyzerTurnResult` (or None if no state file exists),
+        reporting whether a step executed, whether the failure is retryable,
+        the captured reasoning, and whether control was yielded early.
+        """
         if not state_path.exists():
             return None
         self._ensure_session(state_path)
@@ -1753,6 +2078,8 @@ class ToolAgent:
 
         previous_history_messages = list(self._history_messages)
         preserve_history = True
+        # Assemble this turn's request: system prompt + carried history + the
+        # freshly built user message, trimmed to fit the context budget.
         messages: list[dict[str, Any]] = self._trim_messages_for_context(
             [{"role": "system", "content": self._system_prompt}, *self._history_messages, self._build_user_message(user_prompt, current_frame)],
             tools=self._tools(state_path),
@@ -1780,6 +2107,8 @@ class ToolAgent:
 
         try:
             turn_count = 0
+            # Inner agentic loop: call the model, run any `python` tool call,
+            # and repeat until an action executes or a limit/budget stops us.
             while self._tool_steps is None or turn_count < self._tool_steps:
                 yielded_control_reason = control_yield_reason()
                 if yielded_control_reason is not None:
@@ -1891,6 +2220,8 @@ class ToolAgent:
                     append_transcript("THINKING", reasoning)
                     assistant_message["reasoning"] = reasoning
 
+                # No tool call: the model talked but didn't act. Record any
+                # world-model update and nudge it to call `python` next.
                 if not tool_calls:
                     if content:
                         self._update_summarized_knowledge_from_assistant(content)
@@ -1933,6 +2264,8 @@ class ToolAgent:
                 assistant_message["tool_calls"] = tool_calls
                 messages.append(assistant_message)
 
+                # Execute each tool call, appending its result to the
+                # conversation; stop once one actually steps the environment.
                 for tool_index, tool_call in enumerate(tool_calls):
                     function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
                     tool_name = str(function.get("name", "")).strip()
@@ -2013,6 +2346,8 @@ class ToolAgent:
             log.warning("analyzer failed at action %d: %s", display_action_num, exc)
             return None
         finally:
+            # Persist this turn's (trimmed) conversation as the history the next
+            # turn will build on; on partial batches keep the prior history.
             if preserve_history:
                 self._history_messages = self._persistent_history_messages(messages, tools=self._tools(state_path))
             else:
