@@ -368,12 +368,22 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             return action_result
 
         saved_world_model = {"source": ""}
+        last_backtest = {}
+
+        def _exec_world_model(text):
+            namespace = {"__builtins__": runtime_globals["__builtins__"]}
+            exec(compile(text, "<world_model>", "exec"), namespace, namespace)
+            return namespace
+
+        def _publish_world_model(namespace):
+            for name, value in namespace.items():
+                if name != "__builtins__" and name not in reserved_runtime_names:
+                    runtime_globals[name] = value
 
         def save_model(source):
             text = str(source or "")
-            namespace = {"__builtins__": runtime_globals["__builtins__"]}
             try:
-                exec(compile(text, "<world_model>", "exec"), namespace, namespace)
+                namespace = _exec_world_model(text)
             except Exception as exc:
                 return {"ok": False, "error": _sanitize_exception(exc)}
             missing = [name for name in ("encode", "step") if not callable(namespace.get(name))]
@@ -383,10 +393,9 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "error": "world model must define callable " + ", ".join(missing),
                 }
             saved_world_model["source"] = text
+            last_backtest.clear()
             runtime_globals["world_model_error"] = None
-            for name, value in namespace.items():
-                if name != "__builtins__":
-                    runtime_globals[name] = value
+            _publish_world_model(namespace)
             return {
                 "ok": True,
                 "defines": [
@@ -397,8 +406,6 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             }
 
         runtime_globals["save_model"] = save_model
-
-        last_backtest = {}
 
         def _truncate_repr(value, limit=400):
             text = repr(value)
@@ -460,12 +467,16 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
 
         runtime_globals["action"] = action
         _refresh_state(initial.get("state") or {})
+        runtime_globals["world_model_error"] = None
+
+        # Names the harness owns. Model source may bind them in its own
+        # namespace, but must never overwrite the preloaded runtime state.
+        reserved_runtime_names = set(runtime_globals)
 
         stored_source = str((initial.get("state") or {}).get("world_model_source") or "")
-        runtime_globals["world_model_error"] = None
         if stored_source:
             try:
-                exec(compile(stored_source, "<world_model>", "exec"), runtime_globals, runtime_globals)
+                _publish_world_model(_exec_world_model(stored_source))
                 saved_world_model["source"] = stored_source
             except Exception as exc:
                 runtime_globals["world_model_error"] = _sanitize_exception(exc)

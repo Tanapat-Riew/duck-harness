@@ -185,6 +185,50 @@ def test_backtest_with_max_transitions_zero_reports_no_transitions():
     assert report["certified"] is False
 
 
+def test_saving_a_model_clears_a_previous_backtest():
+    outcome = _run(
+        f'run_backtest()\nresult = save_model("""{CORRECT_MODEL}""")',
+        world_model_source=CORRECT_MODEL,
+    )
+    assert outcome["result"]["ok"] is True
+    assert not outcome["last_backtest"]
+
+
+COLLIDING_MODEL = '''
+transitions = []
+history = []
+result = "clobbered"
+
+def encode(frame):
+    return frame.ascii.index("x")
+
+def step(state, action):
+    if action == "RIGHT":
+        return state + 1
+    return state
+'''
+
+RUNTIME_GLOBAL_MODEL = '''
+def encode(frame):
+    return len(transitions)
+
+def step(state, action):
+    return state
+'''
+
+
+def test_a_reloaded_model_does_not_clobber_runtime_state():
+    outcome = _run("result = run_backtest()", world_model_source=COLLIDING_MODEL)
+    assert outcome["result"]["total"] == 2
+    assert outcome["result"]["certified"] is True
+
+
+def test_a_reloaded_model_is_isolated_from_runtime_globals_like_a_saved_one():
+    outcome = _run("result = encode(current_frame)", world_model_source=RUNTIME_GLOBAL_MODEL)
+    assert "NameError" in outcome["error"]
+    assert "transitions" in outcome["error"]
+
+
 def test_no_effect_actions_are_exposed_to_the_sandbox():
     outcome = _run("result = no_effect_actions", no_effect_actions=["LEFT", "SPACE"])
     assert outcome["result"] == ["LEFT", "SPACE"]
