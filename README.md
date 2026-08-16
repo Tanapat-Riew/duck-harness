@@ -13,6 +13,7 @@ We discuss our solution in depth in our [technical write-up on Kaggle](https://w
 | `tufa-arc-agi-framework/` | TAAF: the `Benchmark` / `GameAPI` execution framework the harness runs on. |
 | `example-run/` | One complete benchmark run (25 official games × 20 passes) — what the viewer opens by default. |
 | `taaf-duck-harness-kaggle-share.ipynb` | The Kaggle notebook that drives a run end-to-end (installs the runtime, loads the benchmark, plays the games). |
+| `UPDATE-AND-EVALUATE.md` | Step-by-step: change the harness, smoke-test it locally, ship it to Kaggle, and score the result. |
 
 ## View the example run
 
