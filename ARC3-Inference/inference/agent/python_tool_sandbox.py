@@ -419,6 +419,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "result": _json_safe(runtime_globals.get("result")),
                     "action_results": _json_safe(action_results),
                     "world_model_source": saved_world_model["source"],
+                    "world_model_error": runtime_globals.get("world_model_error"),
                 }
             )
         except Exception as exc:
@@ -429,6 +430,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "stdout": stdout.getvalue(),
                     "action_results": _json_safe(action_results),
                     "world_model_source": saved_world_model["source"],
+                    "world_model_error": runtime_globals.get("world_model_error"),
                 }
             )
 
@@ -608,6 +610,7 @@ def run_sandboxed_python(
                     "error": str(message.get("error", "") or ""),
                     "action_results": list(message.get("action_results") or host_action_results),
                     "world_model_source": str(message.get("world_model_source", "") or ""),
+                    "world_model_error": message.get("world_model_error"),
                 }
 
             _wait_for_process_exit(process)

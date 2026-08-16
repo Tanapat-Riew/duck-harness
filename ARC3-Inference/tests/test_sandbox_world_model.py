@@ -72,3 +72,9 @@ def test_a_saved_model_is_reloaded_into_the_next_call():
     outcome = _run("result = encode(current_frame)", world_model_source=CORRECT_MODEL)
     assert outcome["result"] == 2
     assert outcome["error"] == ""
+
+
+def test_a_stored_model_that_fails_to_reload_reports_the_error():
+    outcome = _run("result = world_model_error", world_model_source="raise ValueError('stale model')\n")
+    assert "stale model" in outcome["world_model_error"]
+    assert outcome["world_model_source"] == ""
