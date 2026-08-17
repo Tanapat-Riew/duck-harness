@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import taaf.support
 
@@ -343,7 +345,12 @@ def _discover_editable_repos() -> list[Path]:
         url = cast(str, data.get("url") or "")
         if not url.startswith("file://"):
             continue
-        src_path = Path(url[len("file://") :]).resolve()
+        # url2pathname, not a naive slice: on Windows a `file:///D:/x` URL
+        # slices to `/D:/x`, which Path treats as *drive-relative* (`D:x`)
+        # and resolves against the cwd. Every editable repo then walks up to
+        # whichever repo the cwd sits inside and dedups to one, silently
+        # dropping the others from the deployment source bundle.
+        src_path = Path(url2pathname(urlparse(url).path)).resolve()
         try:
             repo = _find_repo_root(src_path)
         except RuntimeError:
