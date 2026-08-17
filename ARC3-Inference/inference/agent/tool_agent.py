@@ -1440,7 +1440,18 @@ class ToolAgent:
                 "reloaded into every `python` call automatically."
             )
             backtest = getattr(self, "_last_backtest", None)
-            if isinstance(backtest, dict) and backtest.get("total"):
+            # A recorded backtest with total == 0 ran honestly against an empty
+            # transition log. Reporting it as "never run" would tell the model to
+            # re-run a call that cannot yet certify anything, so the two cases are
+            # rendered differently.
+            if not isinstance(backtest, dict):
+                lines.append("Last backtest: never run. Call `run_backtest()` before trusting this model.")
+            elif not backtest.get("total"):
+                lines.append(
+                    "Last backtest: ran, but no transitions are recorded yet, so nothing "
+                    "could be checked. It will start certifying once actions have executed."
+                )
+            else:
                 status = "certified" if backtest.get("certified") else "not certified"
                 lines.append(
                     f"Last backtest: {backtest.get('exact', 0)}/{backtest.get('total', 0)} "
@@ -1452,8 +1463,6 @@ class ToolAgent:
                         f"First mismatch at transition {mismatch.get('index')} "
                         f"on action {mismatch.get('action')}."
                     )
-            else:
-                lines.append("Last backtest: never run. Call `run_backtest()` before trusting this model.")
         dead_actions = sorted(getattr(self, "_no_effect_actions", {}))
         if dead_actions:
             rendered = ", ".join(dead_actions[:_MAX_RENDERED_NO_EFFECT_ACTIONS])

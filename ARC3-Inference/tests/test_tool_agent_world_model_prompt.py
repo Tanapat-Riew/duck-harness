@@ -88,3 +88,35 @@ def test_status_caps_the_dead_action_list():
     assert "ACT09" in dead_line
     assert "ACT10" not in dead_line
     assert "(+3 more)" in dead_line
+
+
+def test_status_distinguishes_a_zero_transition_backtest_from_never_running():
+    """A recorded 0/0 backtest ran honestly; it is not the same as never running.
+
+    Reporting it as "never run" would tell the model to repeat a call that
+    cannot certify anything until an action has executed.
+    """
+    agent = _agent()
+    agent._world_model_source = "def encode(f):\n    return 0\n"
+    agent._world_model_error = ""
+    agent._no_effect_actions = {}
+    agent._last_backtest = {
+        "ok": True,
+        "total": 0,
+        "exact": 0,
+        "certified": False,
+        "first_mismatch": None,
+    }
+    lines = agent._world_model_status_lines()
+    assert not any("never run" in line for line in lines)
+    assert any("no transitions are recorded yet" in line for line in lines)
+
+
+def test_status_still_reports_never_run_when_no_backtest_exists():
+    agent = _agent()
+    agent._world_model_source = "def encode(f):\n    return 0\n"
+    agent._world_model_error = ""
+    agent._no_effect_actions = {}
+    agent._last_backtest = None
+    lines = agent._world_model_status_lines()
+    assert any("never run" in line for line in lines)
