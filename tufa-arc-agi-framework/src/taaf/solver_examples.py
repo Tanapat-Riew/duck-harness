@@ -199,7 +199,7 @@ class SolverSequence(Solver):
             return
         out_path = self.job_dir / self._ANALYSIS_RELPATH
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(self._build_analysis_html())
+        out_path.write_text(self._build_analysis_html(), encoding="utf-8")
 
     def _build_analysis_html(self) -> str:
         rows = "".join(

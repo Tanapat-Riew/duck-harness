@@ -202,9 +202,9 @@ class TufaSlurmTarget(taaf.deploy.DeploymentTarget):
         # R2.31.2 — capture preamble on the launcher. The bundled
         # snapshot isn't a git repo so the worker can't produce it.
         preamble = taaf.deploy.format_preamble(benchmark)
-        (job_dir / "run_in_worker.py").write_text(_render_worker_script(job_dir, preamble))
+        (job_dir / "run_in_worker.py").write_text(_render_worker_script(job_dir, preamble), encoding="utf-8")
         sbatch_script = _render_sbatch_script(self, benchmark, job_dir)
-        (job_dir / "sbatch_script.sh").write_text(sbatch_script)
+        (job_dir / "sbatch_script.sh").write_text(sbatch_script, encoding="utf-8")
 
         # ``--parsable`` makes sbatch print just ``<job_id>`` (or
         # ``<job_id>;<cluster>``); strip any trailing cluster qualifier.

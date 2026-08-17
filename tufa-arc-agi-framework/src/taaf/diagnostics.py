@@ -2025,7 +2025,7 @@ def _write_movie_player_html(
         f'<video class="pixelart" controls loop autoplay '
         f'style="width: min(720px, 90vw); height: auto;" src="{mp4_name}"></video>'
     )
-    out_path.write_text(_html_page(title, body))
+    out_path.write_text(_html_page(title, body), encoding="utf-8")
 
 
 # --- Public: per-run HTML (R4.01) -------------------------------------------
@@ -2258,7 +2258,7 @@ def generate_run_html(benchmark: taaf.benchmark.Benchmark, out_path: Path) -> No
         "<h2>Per-pass per-game results</h2>"
         f"{table_html}"
     )
-    out_path.write_text(_html_page(benchmark.label or "benchmark", body))
+    out_path.write_text(_html_page(benchmark.label or "benchmark", body), encoding="utf-8")
 
 
 # --- Public: per-run summary (R4.02) ----------------------------------------
@@ -2323,7 +2323,7 @@ def run_summary_text(benchmark: taaf.benchmark.Benchmark) -> str:
 def generate_run_summary_txt(benchmark: taaf.benchmark.Benchmark, out_path: Path) -> None:
     """R4.02: write the brief text summary to ``out_path``."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(run_summary_text(benchmark))
+    out_path.write_text(run_summary_text(benchmark), encoding="utf-8")
 
 
 # --- Public: comparison HTML (R4.11/R4.12) ----------------------------------
@@ -2615,7 +2615,7 @@ def generate_comparison_html(benchmarks: list[taaf.benchmark.Benchmark], out_dir
         f'<img src="data:image/png;base64,{tokens_vs_wall_b64}" alt="total tokens vs job wallclock">'
         f"{per_game_section}"
     )
-    (out_dir / "index.html").write_text(_html_page("Comparison", body))
+    (out_dir / "index.html").write_text(_html_page("Comparison", body), encoding="utf-8")
 
 
 def _per_game_run_curve(
@@ -2868,7 +2868,7 @@ def _write_per_game_page(game_id: str, benchmarks: list[taaf.benchmark.Benchmark
         "<h2>All (run, pass) cells</h2>"
         f"{table_html}"
     )
-    out_path.write_text(_html_page(f"Comparison — {game_id}", body))
+    out_path.write_text(_html_page(f"Comparison — {game_id}", body), encoding="utf-8")
 
 
 # --- Public: regenerate-from-disk helpers ----------------------------------

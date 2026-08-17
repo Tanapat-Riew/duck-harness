@@ -301,7 +301,7 @@ def write_git_status(job_dir: Path) -> None:
     durable file carries the real git state — worker venvs install
     from R2.35 snapshots that deliberately exclude ``.git``."""
     job_dir.mkdir(parents=True, exist_ok=True)
-    (job_dir / "git_status.txt").write_text(format_git_status())
+    (job_dir / "git_status.txt").write_text(format_git_status(), encoding="utf-8")
 
 
 def format_preamble(benchmark: taaf.benchmark.Benchmark) -> str:
