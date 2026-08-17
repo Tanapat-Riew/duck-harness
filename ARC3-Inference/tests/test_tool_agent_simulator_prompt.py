@@ -7,16 +7,16 @@ def _agent():
 
 def test_status_reports_no_model_when_none_saved():
     agent = _agent()
-    agent._world_model_source = ""
+    agent._simulator_source = ""
     agent._last_backtest = None
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     assert any("none saved yet" in line for line in lines)
-    assert any("save_model" in line for line in lines)
+    assert any("save_simulator" in line for line in lines)
 
 
 def test_status_reports_an_uncertified_model():
     agent = _agent()
-    agent._world_model_source = "def encode(f):\n    return 0\n"
+    agent._simulator_source = "def encode(f):\n    return 0\n"
     agent._last_backtest = {
         "ok": True,
         "total": 7,
@@ -24,7 +24,7 @@ def test_status_reports_an_uncertified_model():
         "certified": False,
         "first_mismatch": {"index": 5, "action": "LEFT"},
     }
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     assert any("5/7" in line for line in lines)
     assert any("not certified" in line for line in lines)
     assert any("transition 5" in line and "LEFT" in line for line in lines)
@@ -32,7 +32,7 @@ def test_status_reports_an_uncertified_model():
 
 def test_status_reports_a_certified_model():
     agent = _agent()
-    agent._world_model_source = "def encode(f):\n    return 0\n"
+    agent._simulator_source = "def encode(f):\n    return 0\n"
     agent._last_backtest = {
         "ok": True,
         "total": 7,
@@ -40,50 +40,50 @@ def test_status_reports_a_certified_model():
         "certified": True,
         "first_mismatch": None,
     }
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     assert any("7/7" in line for line in lines)
     assert any("certified" in line for line in lines)
 
 
 def test_status_survives_an_agent_pickled_before_these_attributes_existed():
     agent = _agent()
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     assert any("none saved yet" in line for line in lines)
 
 
 def test_status_reports_a_discarded_model_after_reload_failure():
     agent = _agent()
-    agent._world_model_source = ""
+    agent._simulator_source = ""
     agent._last_backtest = None
-    agent._world_model_error = "NameError: name 'foo' is not defined"
-    lines = agent._world_model_status_lines()
+    agent._simulator_error = "NameError: name 'foo' is not defined"
+    lines = agent._simulator_status_lines()
     assert any("failed to reload" in line and "discarded" in line for line in lines)
 
 
 def test_a_discarded_model_replaces_the_none_saved_yet_line():
     agent = _agent()
-    agent._world_model_source = ""
+    agent._simulator_source = ""
     agent._last_backtest = None
-    agent._world_model_error = "NameError: name 'foo' is not defined"
-    lines = agent._world_model_status_lines()
+    agent._simulator_error = "NameError: name 'foo' is not defined"
+    lines = agent._simulator_status_lines()
     assert not any("none saved yet" in line for line in lines)
 
 
 def test_status_lists_dead_actions():
     agent = _agent()
-    agent._world_model_source = ""
+    agent._simulator_source = ""
     agent._last_backtest = None
     agent._no_effect_actions = {"LEFT": 3, "SPACE": 1}
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     assert any("LEFT, SPACE" in line for line in lines)
 
 
 def test_status_caps_the_dead_action_list():
     agent = _agent()
-    agent._world_model_source = ""
+    agent._simulator_source = ""
     agent._last_backtest = None
     agent._no_effect_actions = {f"ACT{index:02d}": 1 for index in range(13)}
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     dead_line = next(line for line in lines if "changed nothing" in line)
     assert "ACT09" in dead_line
     assert "ACT10" not in dead_line
@@ -97,8 +97,8 @@ def test_status_distinguishes_a_zero_transition_backtest_from_never_running():
     cannot certify anything until an action has executed.
     """
     agent = _agent()
-    agent._world_model_source = "def encode(f):\n    return 0\n"
-    agent._world_model_error = ""
+    agent._simulator_source = "def encode(f):\n    return 0\n"
+    agent._simulator_error = ""
     agent._no_effect_actions = {}
     agent._last_backtest = {
         "ok": True,
@@ -107,16 +107,16 @@ def test_status_distinguishes_a_zero_transition_backtest_from_never_running():
         "certified": False,
         "first_mismatch": None,
     }
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     assert not any("never run" in line for line in lines)
     assert any("no transitions are recorded yet" in line for line in lines)
 
 
 def test_status_still_reports_never_run_when_no_backtest_exists():
     agent = _agent()
-    agent._world_model_source = "def encode(f):\n    return 0\n"
-    agent._world_model_error = ""
+    agent._simulator_source = "def encode(f):\n    return 0\n"
+    agent._simulator_error = ""
     agent._no_effect_actions = {}
     agent._last_backtest = None
-    lines = agent._world_model_status_lines()
+    lines = agent._simulator_status_lines()
     assert any("never run" in line for line in lines)

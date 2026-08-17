@@ -367,35 +367,35 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             _refresh_state(reply.get("state") or {})
             return action_result
 
-        saved_world_model = {"source": ""}
+        saved_simulator = {"source": ""}
         last_backtest = {}
 
-        def _exec_world_model(text):
+        def _exec_simulator(text):
             namespace = {"__builtins__": runtime_globals["__builtins__"]}
-            exec(compile(text, "<world_model>", "exec"), namespace, namespace)
+            exec(compile(text, "<simulator>", "exec"), namespace, namespace)
             return namespace
 
-        def _publish_world_model(namespace):
+        def _publish_simulator(namespace):
             for name, value in namespace.items():
                 if name != "__builtins__" and name not in reserved_runtime_names:
                     runtime_globals[name] = value
 
-        def save_model(source):
+        def save_simulator(source):
             text = str(source or "")
             try:
-                namespace = _exec_world_model(text)
+                namespace = _exec_simulator(text)
             except Exception as exc:
                 return {"ok": False, "error": _sanitize_exception(exc)}
             missing = [name for name in ("encode", "step") if not callable(namespace.get(name))]
             if missing:
                 return {
                     "ok": False,
-                    "error": "world model must define callable " + ", ".join(missing),
+                    "error": "simulator must define callable " + ", ".join(missing),
                 }
-            saved_world_model["source"] = text
+            saved_simulator["source"] = text
             last_backtest.clear()
-            runtime_globals["world_model_error"] = None
-            _publish_world_model(namespace)
+            runtime_globals["simulator_error"] = None
+            _publish_simulator(namespace)
             return {
                 "ok": True,
                 "defines": [
@@ -405,7 +405,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                 ],
             }
 
-        runtime_globals["save_model"] = save_model
+        runtime_globals["save_simulator"] = save_simulator
 
         def _truncate_repr(value, limit=400):
             text = repr(value)
@@ -419,7 +419,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             if not callable(encode_fn) or not callable(step_fn):
                 return {
                     "ok": False,
-                    "error": "No world model loaded. Call save_model(source) with encode and step first.",
+                    "error": "No simulator loaded. Call save_simulator(source) with encode and step first.",
                 }
             transitions = list(runtime_globals.get("transitions") or [])
             if max_transitions is not None:
@@ -467,19 +467,19 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
 
         runtime_globals["action"] = action
         _refresh_state(initial.get("state") or {})
-        runtime_globals["world_model_error"] = None
+        runtime_globals["simulator_error"] = None
 
         # Names the harness owns. Model source may bind them in its own
         # namespace, but must never overwrite the preloaded runtime state.
         reserved_runtime_names = set(runtime_globals)
 
-        stored_source = str((initial.get("state") or {}).get("world_model_source") or "")
+        stored_source = str((initial.get("state") or {}).get("simulator_source") or "")
         if stored_source:
             try:
-                _publish_world_model(_exec_world_model(stored_source))
-                saved_world_model["source"] = stored_source
+                _publish_simulator(_exec_simulator(stored_source))
+                saved_simulator["source"] = stored_source
             except Exception as exc:
-                runtime_globals["world_model_error"] = _sanitize_exception(exc)
+                runtime_globals["simulator_error"] = _sanitize_exception(exc)
 
         try:
             compiled = compile(str(initial.get("code", "")), "<python_tool>", "exec")
@@ -491,8 +491,8 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "stdout": stdout.getvalue(),
                     "result": _json_safe(runtime_globals.get("result")),
                     "action_results": _json_safe(action_results),
-                    "world_model_source": saved_world_model["source"],
-                    "world_model_error": runtime_globals.get("world_model_error"),
+                    "simulator_source": saved_simulator["source"],
+                    "simulator_error": runtime_globals.get("simulator_error"),
                     "last_backtest": _json_safe(last_backtest) if last_backtest else None,
                 }
             )
@@ -503,8 +503,8 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "error": _sanitize_exception(exc),
                     "stdout": stdout.getvalue(),
                     "action_results": _json_safe(action_results),
-                    "world_model_source": saved_world_model["source"],
-                    "world_model_error": runtime_globals.get("world_model_error"),
+                    "simulator_source": saved_simulator["source"],
+                    "simulator_error": runtime_globals.get("simulator_error"),
                     "last_backtest": _json_safe(last_backtest) if last_backtest else None,
                 }
             )
@@ -684,8 +684,8 @@ def run_sandboxed_python(
                     "result": message.get("result"),
                     "error": str(message.get("error", "") or ""),
                     "action_results": list(message.get("action_results") or host_action_results),
-                    "world_model_source": str(message.get("world_model_source", "") or ""),
-                    "world_model_error": str(message.get("world_model_error") or ""),
+                    "simulator_source": str(message.get("simulator_source", "") or ""),
+                    "simulator_error": str(message.get("simulator_error") or ""),
                     "last_backtest": message.get("last_backtest"),
                 }
 

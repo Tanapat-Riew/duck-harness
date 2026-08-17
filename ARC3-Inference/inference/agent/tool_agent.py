@@ -57,7 +57,7 @@ from inference.agent.prompts import (
     MULTIMODAL_CONTEXT_ADDENDUM,
     TOOL_CALL_FORMAT_GUIDANCE,
     VISUAL_GAME_ADDENDUM,
-    WORLD_MODEL_ADDENDUM,
+    SIMULATOR_ADDENDUM,
 )
 
 from inference.agent.vision_context import (
@@ -470,7 +470,7 @@ def _build_system_prompt(*, tool_output_tokens: int) -> str:
         prompt += MULTIMODAL_CONTEXT_ADDENDUM
     prompt += VISUAL_GAME_ADDENDUM
     prompt += PYTHON_ADDENDUM
-    prompt += WORLD_MODEL_ADDENDUM
+    prompt += SIMULATOR_ADDENDUM
     prompt += COMPACT_TOOL_SESSION_ADDENDUM.format(tool_output_tokens=tool_output_tokens)
     return prompt
 
@@ -1180,8 +1180,8 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
-        self._world_model_source: str = ""
-        self._world_model_error: str = ""
+        self._simulator_source: str = ""
+        self._simulator_error: str = ""
         self._last_backtest: dict[str, Any] | None = None
         self._no_effect_actions: dict[str, int] = {}
 
@@ -1215,8 +1215,8 @@ class ToolAgent:
             self._last_step_summary = None
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
-            self._world_model_source = ""
-            self._world_model_error = ""
+            self._simulator_source = ""
+            self._simulator_error = ""
             self._last_backtest = None
             self._no_effect_actions = {}
 
@@ -1379,7 +1379,7 @@ class ToolAgent:
         if not summary:
             return
         if summary.get("level_transition") or summary.get("run_complete") or summary.get("game_over"):
-            # The induced world model (`_world_model_source`) deliberately survives
+            # The induced world model (`_simulator_source`) deliberately survives
             # a level transition: mechanics carry across levels even when layouts
             # do not. Only the prose fields below are level-scoped.
             for key in (
@@ -1412,31 +1412,32 @@ class ToolAgent:
             "- Revise any item above immediately if `current_frame` or `history` contradicts it.",
         ]
 
-    def _world_model_status_lines(self) -> list[str]:
-        """Render induced-model status for the prompt (safe on pre-upgrade pickles).
+    def _simulator_status_lines(self) -> list[str]:
+        """Render simulator status for the prompt (safe on pre-upgrade pickles).
 
         A pending reload error is rendered here and then cleared, so it is shown
         exactly once no matter how many `python` calls the turn made. It replaces
         the "none saved yet" line, which would be false in that state.
         """
-        source = getattr(self, "_world_model_source", "") or ""
-        world_model_error = getattr(self, "_world_model_error", "") or ""
+        source = getattr(self, "_simulator_source", "") or ""
+        simulator_error = getattr(self, "_simulator_error", "") or ""
         lines: list[str]
-        if world_model_error:
+        if simulator_error:
             lines = [
-                "Your saved model failed to reload and has been discarded. Write a fresh one."
+                "Your saved simulator failed to reload and has been discarded. Write a fresh one."
             ]
-            self._world_model_error = ""
+            self._simulator_error = ""
         elif not source.strip():
             lines = [
-                "Induced world model: none saved yet. Write `encode(frame)` and "
-                "`step(state, action)` as a source string and pass it to `save_model(source)`."
+                "Simulator: none saved yet. Before your next action, write `encode(frame)` and "
+                "`step(state, action)` as a source string, call `save_simulator(source)`, then "
+                "`run_backtest()`."
             ]
         else:
             lines = []
         if source.strip():
             lines.append(
-                f"Induced world model: saved, {len(source.splitlines())} lines, "
+                f"Simulator: saved, {len(source.splitlines())} lines, "
                 "reloaded into every `python` call automatically."
             )
             backtest = getattr(self, "_last_backtest", None)
@@ -1445,7 +1446,7 @@ class ToolAgent:
             # re-run a call that cannot yet certify anything, so the two cases are
             # rendered differently.
             if not isinstance(backtest, dict):
-                lines.append("Last backtest: never run. Call `run_backtest()` before trusting this model.")
+                lines.append("Last backtest: never run. Call `run_backtest()` before trusting this simulator.")
             elif not backtest.get("total"):
                 lines.append(
                     "Last backtest: ran, but no transitions are recorded yet, so nothing "
@@ -1476,29 +1477,29 @@ class ToolAgent:
             )
         return lines
 
-    def _apply_sandbox_world_model_result(self, sandbox_result: dict[str, Any]) -> None:
-        """Fold one sandbox run's world-model outcome into carried agent state.
+    def _apply_sandbox_simulator_result(self, sandbox_result: dict[str, Any]) -> None:
+        """Fold one sandbox run's simulator outcome into carried agent state.
 
         This runs once per `python` call, not once per turn, so a reload error is
         recorded as pending rather than cleared here: a later call in the same
         turn must not erase it before the prompt has shown it. It is cleared
-        either by rendering (:meth:`_world_model_status_lines`) or by a fresh
-        model arriving, which resolves it.
+        either by rendering (:meth:`_simulator_status_lines`) or by a fresh
+        simulator arriving, which resolves it.
 
-        A source the model did not have before arrives with no certification: the
-        previous backtest described the previous model.
+        A source the simulator did not have before arrives with no certification:
+        the previous backtest described the previous simulator.
         """
-        saved_source = sandbox_result.get("world_model_source")
+        saved_source = sandbox_result.get("simulator_source")
         if isinstance(saved_source, str) and saved_source.strip():
-            if saved_source != (getattr(self, "_world_model_source", "") or ""):
+            if saved_source != (getattr(self, "_simulator_source", "") or ""):
                 self._last_backtest = None
-            self._world_model_source = saved_source
-            self._world_model_error = ""
+            self._simulator_source = saved_source
+            self._simulator_error = ""
 
-        world_model_error = sandbox_result.get("world_model_error")
-        if isinstance(world_model_error, str) and world_model_error.strip():
-            self._world_model_error = world_model_error
-            self._world_model_source = ""
+        simulator_error = sandbox_result.get("simulator_error")
+        if isinstance(simulator_error, str) and simulator_error.strip():
+            self._simulator_error = simulator_error
+            self._simulator_source = ""
             self._last_backtest = None
 
         backtest_report = sandbox_result.get("last_backtest")
@@ -1649,8 +1650,8 @@ class ToolAgent:
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
         lines.extend(self._summarized_knowledge_lines())
-        lines.extend(self._world_model_status_lines())
         lines.append("end of world model. ")
+        lines.extend(self._simulator_status_lines())
         if action_num == 0:
             lines.append(
                 "Ground yourself in `current_frame` before acting, but start with a compact structural summary rather than restating the full frame."
@@ -1935,7 +1936,7 @@ class ToolAgent:
                     if isinstance(persisted_action_result, dict)
                     else {}
                 ),
-                "world_model_source": getattr(self, "_world_model_source", ""),
+                "simulator_source": getattr(self, "_simulator_source", ""),
                 "no_effect_actions": sorted(getattr(self, "_no_effect_actions", {})),
             }
 
@@ -2020,7 +2021,7 @@ class ToolAgent:
             action_handler=_handle_action,
         )
 
-        self._apply_sandbox_world_model_result(sandbox_result)
+        self._apply_sandbox_simulator_result(sandbox_result)
 
         action_results = [
             item
@@ -2269,7 +2270,7 @@ class ToolAgent:
         backtest_status = getattr(self, "_last_backtest", None)
         if isinstance(backtest_status, dict):
             append_transcript(
-                "WORLD MODEL",
+                "SIMULATOR",
                 f"backtest: {backtest_status.get('exact', 0)}/{backtest_status.get('total', 0)} "
                 f"certified={bool(backtest_status.get('certified'))}",
             )

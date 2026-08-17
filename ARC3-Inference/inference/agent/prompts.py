@@ -92,7 +92,7 @@ PYTHON_ADDENDUM = (
     "- Inspect current and history frames from Python instead of describing frames freehand.\n"
     "- Never print or echo full board frames. Return only compact derived summaries such as object lists, diffs, coordinates, counts, or tiny local crops.\n"
     "- Keep tool-output context size minimal and decision-oriented so you can quickly compare before/after state. It's fine to write a lot of python code, just make the output short and interpretable\n"
-    "- A strong default loop is: summarize the board, infer the desired environment change, write a small scorer or search over candidate sequences, execute the best probe or plan with `action(...)`, then inspect again until you understand exactly what changed.\n"
+    "- The default loop is: summarize the board, write or revise your simulator and save it with `save_simulator(...)`, check it with `run_backtest()`, then use the simulator to choose the next action or short sequence and execute it with `action(...)`. Inspect what changed and repeat.\n"
     "- For object tracking, match objects by color, overlap, bounding box proximity, area change, and edge contact rather than by exact coordinates alone.\n"
     "- For frame diffs, summarize changed cells, color transitions, appearing/disappearing components, movement candidates, and small local row slices around the changed region.\n"
     "- After every action, verify whether gameplay objects changed or whether only a timer, progress bar, or remaining-step bar moved. Do not treat HUD-only changes as evidence that the move worked.\n"
@@ -103,17 +103,20 @@ PYTHON_ADDENDUM = (
     "- If an action result reports `game_over`, `run_complete`, `level_completed`, or `done`, stop acting immediately and re-ground on the next turn.\n"
 )
 
-WORLD_MODEL_ADDENDUM = (
-    "\n\nInduced world model:\n"
-    "- Every environment action costs score. Testing a theory against recorded transitions costs nothing. Prefer the free test.\n"
-    "- Write two functions as a source string and pass it to `save_model(source)`:\n"
-    "  `encode(frame)` maps a frame to a compact hashable state, and `step(state, action)` returns the next state.\n"
-    "- `encode` decides what counts as state. Leave timers, progress bars, and other HUD strips OUT of it, or they will make exact reproduction impossible.\n"
-    "- A saved model is re-loaded into `encode`/`step` at the start of every later `python` call in this game. It is not shared across passes.\n"
-    "- `run_backtest()` replays every recorded transition through your model and returns `total`, `exact`, `certified`, and the first mismatch. Rewrite and re-check as often as you like; it never touches the environment.\n"
-    "- Read `change_report` on action results: `border_only` true means that whole `action(...)` call moved only a HUD strip, so `encode` should ignore that region.\n"
+SIMULATOR_ADDENDUM = (
+    "\n\nSimulator - runnable code, not prose:\n"
+    "- Your `World model:` / `Plan:` notes are prose you write for yourself. A simulator is executable code that predicts what the game does. These are different things: writing notes does not satisfy this section.\n"
+    "- Every environment action costs score. Checking a prediction against moves you have already made costs nothing. Do the free check before you spend an action.\n"
+    "- Build one by writing two functions as a source string and passing it to `save_simulator(source)`:\n"
+    "    `encode(frame)` returns a small hashable summary of the board.\n"
+    "    `step(state, action)` returns the summary you expect after that action.\n"
+    "- Then call `run_backtest()`. It replays every move you have already made through your simulator and returns `total`, `exact`, `certified`, and the first mismatch. It never touches the game.\n"
+    "- Rewrite and re-check as often as you like: being wrong in the simulator is free, being wrong in the game is not.\n"
+    "- `encode` decides what counts as state. Leave timers, progress bars and other HUD strips out of it, or exact reproduction is impossible.\n"
+    "- A saved simulator is reloaded into `encode`/`step` at the start of every later `python` call in this game. It is not shared across passes.\n"
     "- If `step` keeps failing after several rewrites, the problem is usually `encode`, not `step`. Question what the objects are and whether hidden state exists that the grid never shows.\n"
-    "- If you cannot certify a model after several honest attempts, stop trying and play reactively for this level. A partial model is still useful for ruling actions out.\n"
+    "- Read `change_report` on action results: `border_only` true means that whole `action(...)` call moved only a HUD strip, so `encode` should ignore that region.\n"
+    "- If you cannot get a clean backtest after several honest attempts, say so and play reactively for this level. A partial simulator still rules actions out.\n"
 )
 
 COMPACT_TOOL_SESSION_ADDENDUM = (
