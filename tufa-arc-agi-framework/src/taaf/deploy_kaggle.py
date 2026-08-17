@@ -502,8 +502,15 @@ def _write_source_dataset_bundle(
         extra_repos=target.extra_source_repos,
         exclude_repos=_SHARE_EXCLUDE_REPOS if make_share_version else None,
     )
-    taaf.support.atomic_pickle_dump(benchmark, bundle_dir / "benchmark_initial.pkl")
-    taaf.support.atomic_pickle_dump(target, bundle_dir / "deploy_target.pkl")
+    # portable_paths: the Kaggle worker is Linux, so a bundle built on Windows
+    # must not embed WindowsPath objects -- the notebook's `pickle.load` would
+    # raise NotImplementedError before it ever reaches the run.
+    taaf.support.atomic_pickle_dump(
+        benchmark, bundle_dir / "benchmark_initial.pkl", portable_paths=True
+    )
+    taaf.support.atomic_pickle_dump(
+        target, bundle_dir / "deploy_target.pkl", portable_paths=True
+    )
     (bundle_dir / "preamble.txt").write_text(preamble, encoding="utf-8")
     # Bundled so the runner can drop it into /kaggle/working before run():
     # the worker can't regenerate git status (no .git / dist-info there), and
