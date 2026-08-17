@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Offline end-to-end smoke run for the duck sandbox's world-model machinery
-(``save_model`` / ``run_backtest``), driven through the REAL ``HarnessSolver``
+(``save_simulator`` / ``run_backtest``), driven through the REAL ``HarnessSolver``
 / ``ToolAgent`` / sandbox stack against a real TAAF benchmark.
 
 There is no GPU/OpenRouter key available here, and the offline ARC game
@@ -11,12 +11,12 @@ that *do* exist:
 - A stub OpenAI-compatible model server (stdlib ``http.server`` only) that
   always emits one ``python`` tool call. The emitted code is not scripted
   to "look right" — it inspects ``current_frame`` at sandbox runtime to
-  decide UP vs DOWN, and calls the real ``save_model``/``run_backtest``
+  decide UP vs DOWN, and calls the real ``save_simulator``/``run_backtest``
   sandbox globals exactly as an LLM would.
 
 Run from ``ARC3-Inference/``:
 
-    uv run --no-sync python scripts/world_model_smoke_run.py
+    uv run --no-sync python scripts/simulator_smoke_run.py
 
 This does NOT touch python_tool_sandbox.py, tool_agent.py, or prompts.py.
 It only observes the branch as built, through real environment variables
@@ -32,17 +32,17 @@ import threading
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-JOB_DIR = REPO_ROOT / "runs" / "world-model-smoke"
+JOB_DIR = REPO_ROOT / "runs" / "simulator-smoke"
 STUB_MODEL_ID = "stub-world-model"
 
 # ---------------------------------------------------------------------------
-# The Python source handed to save_model(source). It is executed by the real
-# sandbox host (python_tool_sandbox.py's _exec_world_model) exactly like a
+# The Python source handed to save_simulator(source). It is executed by the real
+# sandbox host (python_tool_sandbox.py's _exec_simulator) exactly like a
 # model-authored world model would be. No backslashes are needed anywhere in
 # it (encode() reads frame.ascii[0] directly), so it survives being embedded
 # once inside the outer tool-call code below without any escaping surprises.
 # ---------------------------------------------------------------------------
-WORLD_MODEL_SOURCE = '''
+SIMULATOR_SOURCE = '''
 FILL_TO_CHAR = {0: "W", 1: "w", 2: "g", 4: "c", 5: "B", 6: "M", 14: "N"}
 CHAR_TO_FILL = {}
 for _fill_value, _char_value in FILL_TO_CHAR.items():
@@ -86,10 +86,10 @@ first_char = board_text[0]
 distinct_chars = sorted(set(board_text.replace(chr(10), "")))
 print("current_frame summary: shape=" + str(frame.shape) + " step=" + str(frame.step) + " level=" + str(frame.level) + " distinct_chars=" + str(distinct_chars))
 
-world_model_source = r"""''' + WORLD_MODEL_SOURCE + '''"""
+simulator_source = r"""''' + SIMULATOR_SOURCE + '''"""
 
-save_result = save_model(world_model_source)
-print("save_model(source) -> " + str(save_result))
+save_result = save_simulator(simulator_source)
+print("save_simulator(source) -> " + str(save_result))
 
 backtest_report = run_backtest()
 print("run_backtest() -> " + str(backtest_report))
@@ -239,7 +239,7 @@ def main() -> int:
         shutil.rmtree(JOB_DIR)
 
     solver = HarnessSolver(
-        label="world-model-smoke",
+        label="simulator-smoke",
         model=STUB_MODEL_ID,
         analyzer_timeout=30.0,
         max_actions_per_game=20,
@@ -248,7 +248,7 @@ def main() -> int:
         save_request_logs=True,
     )
     benchmark = taaf.benchmark.Benchmark(
-        label="world-model-smoke",
+        label="simulator-smoke",
         games=[taaf.game_examples.ExampleGame()],
         solver=solver,
         n_passes=1,
