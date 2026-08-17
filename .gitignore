@@ -19,3 +19,11 @@ node_modules/
 .DS_Store
 .superpowers/
 ARC3-Inference/runs/
+
+# Credentials — never commit these
+kaggle.json
+**/kaggle.json
+.env.*
+!.env.example
+*.pem
+*.key
