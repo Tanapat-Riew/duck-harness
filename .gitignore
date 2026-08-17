@@ -18,3 +18,4 @@ node_modules/
 # OS
 .DS_Store
 .superpowers/
+ARC3-Inference/runs/
